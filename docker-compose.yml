@@ -1,0 +1,255 @@
+name: client360
+
+# One-command local environment (SPEC.md §10.7).
+#
+#   docker compose up -d              infra + migrations (works today, no Java needed)
+#   docker compose --profile seed up  add local seed data
+#   docker compose --profile app up   add the three services (once src/ is built)
+
+services:
+
+  # ---------------------------------------------------------------- PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: client360-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-client360}
+      POSTGRES_USER: ${POSTGRES_USER:-client360}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+      # SPEC.md §4.1: every timestamp is UTC. Keep the container honest.
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-client360} -d ${POSTGRES_DB:-client360}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ------------------------------------------------------- Flyway (one-shot)
+  # Each service owns its own schema and its own migration history (CLAUDE.md
+  # → Architecture). Two independent Flyway runs, two history tables.
+  flyway-client:
+    image: flyway/flyway:10-alpine
+    container_name: client360-flyway-client
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations/client-service:/flyway/sql:ro
+    command: >
+      -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}
+      -user=${POSTGRES_USER:-client360}
+      -password=${POSTGRES_PASSWORD:-client360_local_only}
+      -schemas=client
+      -defaultSchema=client
+      -connectRetries=15
+      -baselineOnMigrate=false
+      migrate
+
+  flyway-interaction:
+    image: flyway/flyway:10-alpine
+    container_name: client360-flyway-interaction
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # interactions carry FKs into client.clients / client.users in the shared
+      # dev database, so the client schema must exist first.
+      flyway-client:
+        condition: service_completed_successfully
+    volumes:
+      - ./db/migrations/interaction-service:/flyway/sql:ro
+    command: >
+      -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}
+      -user=${POSTGRES_USER:-client360}
+      -password=${POSTGRES_PASSWORD:-client360_local_only}
+      -schemas=interaction
+      -defaultSchema=interaction
+      -connectRetries=15
+      migrate
+
+  # ------------------------------------------------------------ Seed (opt-in)
+  seed:
+    image: postgres:16-alpine
+    container_name: client360-seed
+    profiles: ["seed"]
+    depends_on:
+      flyway-interaction:
+        condition: service_completed_successfully
+    # No shell: psql is the entrypoint and connection details come from PG* env
+    # vars, so there is nothing to quote, split or escape.
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-client360}
+      PGDATABASE: ${POSTGRES_DB:-client360}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+    volumes:
+      - ./db/seed/local:/seed:ro
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-f", "/seed/seed_local.sql"]
+
+  # --------------------------------------------------------------- Kafka
+  # KRaft mode, single broker. Partition counts per SPEC.md §3.2.
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: client360-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    ports:
+      - "${KAFKA_PORT:-29092}:29092"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: client360-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # Deliberately free of '$': compose treats '$' as interpolation and needs '$$'
+    # escaping, which is easy to misread and survives `docker compose config`
+    # ambiguously. Explicit lines are longer and cannot be misread.
+    # Partition counts are SPEC.md §3.2.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        cd /opt/kafka/bin
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 6 --topic client.events
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 6 --topic interaction.events
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 6 --topic task.events
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 3 --topic auth.events
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 1 --topic client.events.DLT
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 1 --topic interaction.events.DLT
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 1 --topic task.events.DLT
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --replication-factor 1 --partitions 1 --topic auth.events.DLT
+        echo '--- topics ---'
+        ./kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  # --------------------------------------------------------------- MinIO
+  # Object store for interaction attachments (SPEC.md §6.2.3).
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    container_name: client360-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-client360}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-client360_local_only}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-09-16T17-43-14Z
+    container_name: client360-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-client360} ${MINIO_ROOT_PASSWORD:-client360_local_only}
+      mc mb --ignore-existing local/client360-attachments
+      mc version enable local/client360-attachments
+      mc anonymous set none local/client360-attachments
+      echo 'bucket ready: client360-attachments'
+      "
+
+  # ------------------------------------------------- Application services
+  # Enabled once src/ contains buildable modules: docker compose --profile app up
+  client-service:
+    profiles: ["app"]
+    build: ./src/client-service
+    container_name: client360-client-service
+    depends_on:
+      flyway-client:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=client
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
+      CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
+    ports:
+      - "8080:8080"
+
+  interaction-service:
+    profiles: ["app"]
+    build: ./src/interaction-service
+    container_name: client360-interaction-service
+    depends_on:
+      flyway-interaction:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=interaction
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CLIENT360_S3_ENDPOINT: http://minio:9000
+      CLIENT360_S3_BUCKET: client360-attachments
+      CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
+    ports:
+      - "8081:8080"
+
+  audit-service:
+    profiles: ["app"]
+    build: ./src/audit-service
+    container_name: client360-audit-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=audit
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "8082:8080"
+
+volumes:
+  pgdata:
+  kafkadata:
+  miniodata:

@@ -1,0 +1,41 @@
+# Secrets — never commit. Use .env.example as the template.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.jks
+
+# Build output
+target/
+build/
+out/
+*.class
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+!**/.mvn/wrapper/maven-wrapper.jar
+
+# Node (frontend)
+node_modules/
+dist/
+.vite/
+coverage/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and local scratch
+*.log
+logs/
+tmp/
