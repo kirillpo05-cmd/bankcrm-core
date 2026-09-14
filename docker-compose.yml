@@ -201,7 +201,7 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: local
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=client
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=client,public
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -223,7 +223,7 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: local
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=interaction
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=interaction,public
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
