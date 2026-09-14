@@ -280,6 +280,33 @@ An expired or malformed cursor returns `400 INVALID_CURSOR`; the client restarts
 | Key absent | `400 VALIDATION_FAILED` |
 | Key present, original request still in flight | `409 IDEMPOTENCY_IN_PROGRESS`, `Retry-After: 1` |
 
+The claim is taken by inserting into `idempotency_keys` **inside the same transaction** as the business change, so a failed request rolls its claim back and a retry executes afresh — there is no "stuck in flight" state to clean up after a crash. One copy of this table lives in each service schema that has creates.
+
+```sql
+CREATE TABLE idempotency_keys (
+    user_id           UUID         NOT NULL,
+    endpoint          VARCHAR(512) NOT NULL,   -- "POST /api/v1/clients", never the query string
+    idempotency_key   UUID         NOT NULL,
+    payload_hash      BYTEA        NOT NULL,   -- HMAC of the canonical body under the pepper
+    response_status   INTEGER,
+    response_headers  JSONB,
+    response_body_enc BYTEA,                   -- AES-256-GCM: a create response echoes PII
+    key_version       SMALLINT     NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    completed_at      TIMESTAMPTZ,
+
+    CONSTRAINT pk_idempotency_keys PRIMARY KEY (user_id, endpoint, idempotency_key),
+    CONSTRAINT ck_idempotency_completed_pair
+        CHECK ((completed_at IS NULL) = (response_status IS NULL)),
+    CONSTRAINT ck_idempotency_status_range
+        CHECK (response_status IS NULL OR response_status BETWEEN 100 AND 599)
+);
+
+CREATE INDEX ix_idempotency_keys_created_at ON idempotency_keys (created_at);
+```
+
+Deliberately **no foreign key on `user_id`**. Every other user reference records something that happened and is `RESTRICT`; these rows are a 24-hour retry cache that records nothing, and a transient row must not be able to block the deactivation flow of RB-BR-07.
+
 ### 4.7 Encryption at rest
 
 Per `PROJECT_IDEA.md` §9, sensitive fields are encrypted. Implementation is **application-level AES-256-GCM** with a data key held in the KMS/vault — not `pgcrypto` called from SQL, which would put keys into query logs and `pg_stat_statements`.
