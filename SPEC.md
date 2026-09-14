@@ -280,6 +280,33 @@ An expired or malformed cursor returns `400 INVALID_CURSOR`; the client restarts
 | Key absent | `400 VALIDATION_FAILED` |
 | Key present, original request still in flight | `409 IDEMPOTENCY_IN_PROGRESS`, `Retry-After: 1` |
 
+The claim is taken by inserting into `idempotency_keys` **inside the same transaction** as the business change, so a failed request rolls its claim back and a retry executes afresh — there is no "stuck in flight" state to clean up after a crash. One copy of this table lives in each service schema that has creates.
+
+```sql
+CREATE TABLE idempotency_keys (
+    user_id           UUID         NOT NULL,
+    endpoint          VARCHAR(512) NOT NULL,   -- "POST /api/v1/clients", never the query string
+    idempotency_key   UUID         NOT NULL,
+    payload_hash      BYTEA        NOT NULL,   -- HMAC of the canonical body under the pepper
+    response_status   INTEGER,
+    response_headers  JSONB,
+    response_body_enc BYTEA,                   -- AES-256-GCM: a create response echoes PII
+    key_version       SMALLINT     NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    completed_at      TIMESTAMPTZ,
+
+    CONSTRAINT pk_idempotency_keys PRIMARY KEY (user_id, endpoint, idempotency_key),
+    CONSTRAINT ck_idempotency_completed_pair
+        CHECK ((completed_at IS NULL) = (response_status IS NULL)),
+    CONSTRAINT ck_idempotency_status_range
+        CHECK (response_status IS NULL OR response_status BETWEEN 100 AND 599)
+);
+
+CREATE INDEX ix_idempotency_keys_created_at ON idempotency_keys (created_at);
+```
+
+Deliberately **no foreign key on `user_id`**. Every other user reference records something that happened and is `RESTRICT`; these rows are a 24-hour retry cache that records nothing, and a transient row must not be able to block the deactivation flow of RB-BR-07.
+
 ### 4.7 Encryption at rest
 
 Per `PROJECT_IDEA.md` §9, sensitive fields are encrypted. Implementation is **application-level AES-256-GCM** with a data key held in the KMS/vault — not `pgcrypto` called from SQL, which would put keys into query logs and `pg_stat_statements`.
@@ -945,7 +972,7 @@ Three steps: pick duplicate → resolve fields → confirm.
 | CP-EC-01 | Two managers `PATCH` the same client concurrently | Second write fails `409 VERSION_CONFLICT`; UI renders the field-level diff; no lost update |
 | CP-EC-02 | Client changes email to one held by a soft-deleted client | Allowed — the unique index is partial on `deleted_at IS NULL` |
 | CP-EC-03 | Mother and son share a landline; manager searches by phone | Both returned in `results`; `exact: false`; disambiguation list shows DOB year to tell them apart |
-| CP-EC-04 | Phone entered as `0511 234 567` (national format) | Normalized to E.164 using the client's country before hashing; both forms find the same record |
+| CP-EC-04 | Phone entered as `511 234 567` (national format) | Normalized to E.164 using the client's country before hashing; both forms find the same record. Normalization **validates**, it does not merely reformat: a retired trunk prefix (`0511 234 567`, dropped in Poland in 2009) still parses, to `+480511234567`, and accepting it would hash one person to two values and make them unfindable by the number they were created with. Unparseable or invalid → `400` |
 | CP-EC-05 | Email differs only in case or has a `+tag` | Case is normalized before hashing (so `A@x.com` = `a@x.com`). `+tag` is **not** stripped — it is a semantically different address at some providers, and stripping it would merge distinct people |
 | CP-EC-06 | Owner manager is deactivated while holding 60 clients | `RESTRICT` blocks the FK delete. Deactivation flow (RB-BR-07) forces bulk reassignment first; orphan clients are impossible |
 | CP-EC-07 | KYC expires overnight while a manager has the card open | Next write returns `422` with an explanation; the UI polls `updatedAt` every 60 s and shows a "This record changed" banner |
