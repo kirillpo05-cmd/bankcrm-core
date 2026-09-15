@@ -110,6 +110,8 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 - `.claude/agents/` — `database-architect`, `backend-engineer`, `security-engineer`,
   `frontend-developer`, `qa-reviewer`. Use them when the user asks for them; otherwise work
   directly.
+- `.claude/skills/` — procedures for the things done repeatedly and easy to get wrong:
+  `new-migration`, `new-endpoint`, `local-stack`, `pr-description`.
 - `SPEC_TEMPLATE.md` — the shape every new feature spec must follow.
 
 ## Definition of done
