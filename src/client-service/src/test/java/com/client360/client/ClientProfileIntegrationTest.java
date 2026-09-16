@@ -25,7 +25,7 @@ class ClientProfileIntegrationTest extends AbstractIntegrationTest {
     class Create {
 
         @Test
-        void createsClientAndReturnsCard_CP_US_03() throws Exception {
+        void createsClientAndReturnsCard() throws Exception {
             mvc.perform(create(body("CIF-0092841", "anna.kowalska@example.com", "+48511234567")))
                     .andExpect(status().isCreated())
                     .andExpect(header().string(HttpHeaders.ETAG, "\"0\""))
@@ -417,19 +417,5 @@ class ClientProfileIntegrationTest extends AbstractIntegrationTest {
         return jdbc.sql("SELECT count(*) FROM client.clients")
                 .query(Integer.class)
                 .single();
-    }
-
-    private int countEvents(String eventType) {
-        return jdbc.sql("SELECT count(*) FROM client.outbox_events WHERE event_type = :type")
-                .param("type", eventType)
-                .query(Integer.class)
-                .single();
-    }
-
-    /** Deliberately crude: the tests assert on the wire shape, not on a deserialized model. */
-    private static String jsonField(String json, String field) {
-        String marker = "\"" + field + "\":\"";
-        int start = json.indexOf(marker) + marker.length();
-        return json.substring(start, json.indexOf('"', start));
     }
 }

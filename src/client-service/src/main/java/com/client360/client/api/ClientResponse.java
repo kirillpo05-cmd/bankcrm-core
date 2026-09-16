@@ -52,7 +52,12 @@ public record ClientResponse(
      *     negative once expiry has passed but the nightly sweep (CP-BR-06) has not yet run
      */
     public record Kyc(
-            KycStatus status, Instant verifiedAt, Instant expiresAt, Long daysUntilExpiry, String rejectionReason) {}
+            KycStatus status,
+            Instant verifiedAt,
+            Instant expiresAt,
+            Long daysUntilExpiry,
+            String rejectionReason,
+            String note) {}
 
     public record UserSummary(UUID id, String fullName) {}
 

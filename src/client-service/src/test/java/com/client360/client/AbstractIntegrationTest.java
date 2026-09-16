@@ -1,5 +1,9 @@
 package com.client360.client;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.client360.common.idempotency.IdempotencyService;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -13,10 +17,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
@@ -33,10 +40,19 @@ public abstract class AbstractIntegrationTest {
     protected static final UUID TEAM_RWN = UUID.fromString("7a000000-0000-4000-8000-000000000001");
 
     protected static final UUID TEAM_RWS = UUID.fromString("7a000000-0000-4000-8000-000000000002");
+
+    /** Supervisor of RWN — the approver who is not the owner in the CP-BR-05 tests. */
+    protected static final UUID OLA_WISNIEWSKA = UUID.fromString("3f000000-0000-4000-8000-000000000001");
+
     protected static final UUID ADAM_NOWAK = UUID.fromString("3f000000-0000-4000-8000-000000000002");
     protected static final UUID MARTA_LEWANDOWSKA = UUID.fromString("3f000000-0000-4000-8000-000000000003");
+
+    /** Supervisor of RWS, so TEAM scope excludes every client owned in RWN. */
+    protected static final UUID PIOTR_KOWALCZYK = UUID.fromString("3f000000-0000-4000-8000-000000000004");
+
     protected static final UUID JAN_ZIELINSKI = UUID.fromString("3f000000-0000-4000-8000-000000000005");
     protected static final UUID SOFIA_ADAMSKA = UUID.fromString("3f000000-0000-4000-8000-000000000006");
+    protected static final UUID EWA_ZGODNOSC = UUID.fromString("3f000000-0000-4000-8000-000000000008");
 
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
             .withDatabaseName("client360")
@@ -85,7 +101,73 @@ public abstract class AbstractIntegrationTest {
     }
 
     protected String bearerFor(UUID userId) {
-        return TestJwt.bearerFor(userId, "test." + userId + "@bank.example", "Test User", java.util.List.of("MANAGER"));
+        return bearerFor(userId, "MANAGER");
+    }
+
+    /**
+     * The {@code roles} claim reaches authorization only through a test double for the
+     * {@code AccessPolicy} seam ({@link MatrixAccessPolicy}); production resolves permission and
+     * scope from the database and never reads a role string (RB-BR-01).
+     */
+    protected String bearerFor(UUID userId, String role) {
+        return TestJwt.bearerFor(userId, "test." + userId + "@bank.example", "Test User", java.util.List.of(role));
+    }
+
+    /** Creates a client owned by {@code owner}, acting as that owner, and returns its id. */
+    protected String createClient(UUID owner, String externalRef, String email, String phone) throws Exception {
+        return createClient(owner, "MANAGER", owner, externalRef, email, phone);
+    }
+
+    /**
+     * Creates a client through the API rather than by INSERT, so every fixture goes through the
+     * same validation, encryption and event path the endpoints under test rely on.
+     */
+    protected String createClient(UUID actor, String role, UUID owner, String externalRef, String email, String phone)
+            throws Exception {
+        String body = """
+                {
+                  "externalRef": "%s",
+                  "firstName": "Anna",
+                  "lastName": "Kowalska",
+                  "dateOfBirth": "1988-04-17",
+                  "email": "%s",
+                  "phone": "%s",
+                  "taxId": "PL88%08d",
+                  "address": "ul. Prosta 51, 00-838 Warszawa",
+                  "preferredChannel": "PHONE",
+                  "segment": "RETAIL",
+                  "ownerManagerId": "%s"
+                }
+                """.formatted(
+                        externalRef,
+                        email,
+                        phone,
+                        // Tax ID is unique among non-deleted clients (CP-BR-02), so two
+                        // fixtures may not share one. Phone deliberately may (CP-EC-03).
+                        Math.floorMod(externalRef.hashCode(), 100_000_000),
+                        owner);
+        MvcResult result = mvc.perform(post("/api/v1/clients")
+                        .header(HttpHeaders.AUTHORIZATION, bearerFor(actor, role))
+                        .header(IdempotencyService.HEADER, UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return jsonField(result.getResponse().getContentAsString(), "id");
+    }
+
+    /** Deliberately crude: the tests assert on the wire shape, not on a deserialized model. */
+    protected static String jsonField(String json, String field) {
+        String marker = "\"" + field + "\":\"";
+        int start = json.indexOf(marker) + marker.length();
+        return json.substring(start, json.indexOf('"', start));
+    }
+
+    protected int countEvents(String eventType) {
+        return jdbc.sql("SELECT count(*) FROM client.outbox_events WHERE event_type = :type")
+                .param("type", eventType)
+                .query(Integer.class)
+                .single();
     }
 
     /**
@@ -111,7 +193,10 @@ public abstract class AbstractIntegrationTest {
                             (:rws, 'Retail Warsaw South', 'RWS', 'Europe/Warsaw')
                         ON CONFLICT (id) DO NOTHING
                         """).param("rwn", TEAM_RWN).param("rws", TEAM_RWS).update();
+        insertUser(OLA_WISNIEWSKA, "EMP-1001", "o.wisniewska@bank.example", "Ola Wiśniewska", TEAM_RWN);
         insertUser(ADAM_NOWAK, "EMP-1002", "a.nowak@bank.example", "Adam Nowak", TEAM_RWN);
+        insertUser(PIOTR_KOWALCZYK, "EMP-1004", "p.kowalczyk@bank.example", "Piotr Kowalczyk", TEAM_RWS);
+        insertUser(EWA_ZGODNOSC, "EMP-1008", "e.zgodnosc@bank.example", "Ewa Zgodność", null);
         insertUser(MARTA_LEWANDOWSKA, "EMP-1003", "m.lewandowska@bank.example", "Marta Lewandowska", TEAM_RWN);
         insertUser(JAN_ZIELINSKI, "EMP-1005", "j.zielinski@bank.example", "Jan Zieliński", TEAM_RWS);
         // Cross-team role: no primary team, which is what makes CP-BR-03 unsatisfiable for them.

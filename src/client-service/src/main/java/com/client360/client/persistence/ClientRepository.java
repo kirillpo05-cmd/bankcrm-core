@@ -43,6 +43,7 @@ public class ClientRepository {
     static final String AAD_PHONE = "client.clients.phone";
     static final String AAD_TAX_ID = "client.clients.tax_id";
     static final String AAD_ADDRESS = "client.clients.address";
+    static final String AAD_KYC_NOTE = "client.clients.kyc_note";
 
     private static final String COLUMNS = """
             id, external_ref, first_name, last_name, middle_name, date_of_birth,
@@ -52,7 +53,7 @@ public class ClientRepository {
             status::text            AS status,
             risk::text              AS risk,
             kyc_status::text        AS kyc_status,
-            kyc_verified_at, kyc_expires_at, kyc_rejection_reason,
+            kyc_verified_at, kyc_expires_at, kyc_rejection_reason, kyc_note_enc,
             owner_manager_id, team_id, last_interaction_at, open_task_count,
             merged_into_id, merged_at, version,
             created_at, created_by, updated_at, updated_by, deleted_at
@@ -118,7 +119,90 @@ public class ClientRepository {
                 .single();
     }
 
+    /**
+     * Writes the whole mutable state of {@code next} if the row is still at {@code expectedVersion},
+     * and returns the stored row. Empty means someone else wrote first — or the row was deleted —
+     * and the caller answers {@code 409 VERSION_CONFLICT} (§4.8).
+     *
+     * <p>One statement for every mutation rather than one per field set: there is no SQL built
+     * from what the caller sent, and every ciphertext column is rewritten under the current key,
+     * so a row can never end up holding columns encrypted under two different
+     * {@code key_version}s.
+     *
+     * <p>{@code external_ref}, {@code owner_manager_id} and {@code team_id} are absent on purpose.
+     * The first is immutable (CP-BR-01); the other two change only through reassignment, which
+     * re-derives the team in the same transaction (CP-BR-03).
+     */
+    public Optional<Client> update(Client next, int expectedVersion, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            first_name           = :firstName,
+                            last_name            = :lastName,
+                            middle_name          = :middleName,
+                            date_of_birth        = :dateOfBirth,
+                            email_enc            = :emailEnc,
+                            email_hash           = :emailHash,
+                            phone_enc            = :phoneEnc,
+                            phone_hash           = :phoneHash,
+                            tax_id_enc           = :taxIdEnc,
+                            tax_id_hash          = :taxIdHash,
+                            address_enc          = :addressEnc,
+                            kyc_note_enc         = :kycNoteEnc,
+                            key_version          = :keyVersion,
+                            preferred_channel    = CAST(:preferredChannel AS contact_channel),
+                            segment              = CAST(:segment AS client_segment),
+                            status               = CAST(:status AS client_status),
+                            risk                 = CAST(:risk AS risk_rating),
+                            kyc_status           = CAST(:kycStatus AS kyc_status),
+                            kyc_verified_at      = :kycVerifiedAt,
+                            kyc_expires_at       = :kycExpiresAt,
+                            kyc_rejection_reason = :kycRejectionReason,
+                            version              = version + 1,
+                            updated_at           = now(),
+                            updated_by           = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", next.id())
+                .param("expectedVersion", expectedVersion)
+                .param("firstName", next.firstName())
+                .param("lastName", next.lastName())
+                .param("middleName", next.middleName())
+                .param("dateOfBirth", next.dateOfBirth())
+                .param("emailEnc", cipher.encrypt(next.email(), AAD_EMAIL))
+                .param("emailHash", hasher.hash(next.email()))
+                .param("phoneEnc", cipher.encrypt(next.phone(), AAD_PHONE))
+                .param("phoneHash", hasher.hash(next.phone()))
+                .param("taxIdEnc", cipher.encrypt(next.taxId(), AAD_TAX_ID))
+                .param("taxIdHash", hasher.hash(next.taxId()))
+                .param("addressEnc", cipher.encrypt(next.address(), AAD_ADDRESS))
+                .param("kycNoteEnc", cipher.encrypt(next.kycNote(), AAD_KYC_NOTE))
+                .param("keyVersion", cipher.currentKeyVersion())
+                .param("preferredChannel", next.preferredChannel().name())
+                .param("segment", next.segment().name())
+                .param("status", next.status().name())
+                .param("risk", next.risk().name())
+                .param("kycStatus", next.kycStatus().name())
+                .param("kycVerifiedAt", timestamp(next.kycVerifiedAt()))
+                .param("kycExpiresAt", timestamp(next.kycExpiresAt()))
+                .param("kycRejectionReason", next.kycRejectionReason())
+                .param("actor", actorId)
+                .query(this::map)
+                .optional();
+    }
+
     // -------------------------------------------------------------------- reads
+
+    /**
+     * The live row, locked until the transaction ends. For state-machine transitions (CP-BR-04):
+     * two approvers acting at once must not both see {@code PENDING} and both write.
+     */
+    public Optional<Client> findByIdForUpdate(UUID id) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM clients WHERE id = :id AND deleted_at IS NULL FOR UPDATE")
+                .param("id", id)
+                .query(this::map)
+                .optional();
+    }
 
     /** The card read: soft-deleted rows are invisible, which is what makes ER-01's 404 truthful. */
     public Optional<Client> findById(UUID id) {
@@ -242,6 +326,7 @@ public class ClientRepository {
                 instant(rs, "kyc_verified_at"),
                 instant(rs, "kyc_expires_at"),
                 rs.getString("kyc_rejection_reason"),
+                cipher.decrypt(rs.getBytes("kyc_note_enc"), keyVersion, AAD_KYC_NOTE),
                 rs.getObject("owner_manager_id", UUID.class),
                 rs.getObject("team_id", UUID.class),
                 instant(rs, "last_interaction_at"),
@@ -254,6 +339,11 @@ public class ClientRepository {
                 instant(rs, "updated_at"),
                 rs.getObject("updated_by", UUID.class),
                 instant(rs, "deleted_at"));
+    }
+
+    /** Bound as {@code TIMESTAMPTZ}; a bare {@link Instant} has no JDBC type of its own. */
+    private static OffsetDateTime timestamp(Instant value) {
+        return value == null ? null : value.atOffset(java.time.ZoneOffset.UTC);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

@@ -69,6 +69,61 @@ public class ClientEvents {
     }
 
     /**
+     * {@code PATCH /clients/{id}} (CP-US-03). The caller only emits this when {@code changes} is
+     * non-empty: a patch that changed nothing wrote nothing, and CP-BR-12 counts writes.
+     */
+    public void updated(Client before, Client after) {
+        append(
+                after.id(),
+                events.event("client.updated", ENTITY, after.id())
+                        .clientId(after.id())
+                        .action("UPDATE")
+                        .changes(diff(before, after))
+                        .build());
+    }
+
+    /**
+     * {@code POST /clients/{id}/kyc} (CP-BR-04). Its own event type rather than a
+     * {@code client.updated}, so a compliance query for KYC decisions does not have to sift every
+     * phone-number correction. The note and the rejection reason are free text about identity
+     * documents and are masked like any other PII.
+     */
+    public void kycChanged(Client before, Client after) {
+        append(
+                after.id(),
+                events.event("client.kyc_changed", ENTITY, after.id())
+                        .clientId(after.id())
+                        .action("UPDATE")
+                        .changes(diff(before, after))
+                        .build());
+    }
+
+    /**
+     * Every field that can change after creation, with AR-01 applied per field. Unchanged fields
+     * are dropped by {@link ChangedFields}, so this is safe to call with the whole record.
+     */
+    static ChangedFields diff(Client before, Client after) {
+        return ChangedFields.create()
+                .sensitive("firstName", before.firstName(), after.firstName())
+                .sensitive("lastName", before.lastName(), after.lastName())
+                .sensitive("middleName", before.middleName(), after.middleName())
+                .sensitive("dateOfBirth", before.dateOfBirth(), after.dateOfBirth())
+                .sensitive("email", before.email(), after.email())
+                .sensitive("phone", before.phone(), after.phone())
+                .sensitive("taxId", before.taxId(), after.taxId())
+                .sensitive("address", before.address(), after.address())
+                .put("preferredChannel", before.preferredChannel(), after.preferredChannel())
+                .put("segment", before.segment(), after.segment())
+                .put("status", before.status(), after.status())
+                .put("risk", before.risk(), after.risk())
+                .put("kycStatus", before.kycStatus(), after.kycStatus())
+                .put("kycVerifiedAt", before.kycVerifiedAt(), after.kycVerifiedAt())
+                .put("kycExpiresAt", before.kycExpiresAt(), after.kycExpiresAt())
+                .sensitive("kycRejectionReason", before.kycRejectionReason(), after.kycRejectionReason())
+                .sensitive("kycNote", before.kycNote(), after.kycNote());
+    }
+
+    /**
      * CP-BR-13: emitted only when decrypted PII actually reaches the caller — opening a card, or
      * an out-of-scope identifier hit in lookup. A masked result list emits nothing, which is what
      * keeps the audit table from drowning in list views.
@@ -83,6 +138,16 @@ public class ClientEvents {
                         .action("READ_SENSITIVE")
                         .context("disclosure", disclosure)
                         .build());
+    }
+
+    /**
+     * A disclosure that rides on a rejected request — the {@code 409 VERSION_CONFLICT} body puts
+     * the current decrypted record in {@code details[0].current} so the UI can render a diff
+     * (§4.8). The request's own transaction rolls back, so this commits separately; otherwise
+     * the one response that hands PII over on a failure would be the one that is never audited.
+     */
+    public void readSensitiveCommitted(UUID clientId, String disclosure) {
+        ownTransaction.executeWithoutResult(status -> readSensitive(clientId, disclosure));
     }
 
     /**
