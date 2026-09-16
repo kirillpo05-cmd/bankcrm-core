@@ -460,6 +460,7 @@ CREATE TABLE clients (
     kyc_verified_at      TIMESTAMPTZ,
     kyc_expires_at       TIMESTAMPTZ,
     kyc_rejection_reason TEXT,
+    kyc_note_enc         BYTEA,          -- AES-256-GCM; evidence note of the latest decision (§5.3 kyc)
     -- ownership
     owner_manager_id     UUID           NOT NULL,
     team_id              UUID           NOT NULL,
@@ -771,30 +772,65 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 | Status | Code | Cause |
 |---|---|---|
 | `400` | `VALIDATION_FAILED` | Unknown field, `null` on a non-nullable field, bad format |
-| `403` | `PERMISSION_DENIED` | Manager attempting to change `ownerManagerId`, `teamId`, `risk` or `kycStatus` |
+| `403` | `PERMISSION_DENIED` | Changing `ownerManagerId`, `teamId` or `kycStatus` (any caller); `risk` without `client:kyc`; `status` without `client:delete` |
 | `404` | `CLIENT_NOT_FOUND` | Out of scope |
 | `409` | `VERSION_CONFLICT` | `If-Match` stale; `details[0].current` holds server state |
 | `409` | `CLIENT_DUPLICATE_EMAIL` | New email belongs to another client |
+| `409` | `CLIENT_DUPLICATE_TAX_ID` | New tax ID belongs to another client |
 | `412` | `PRECONDITION_REQUIRED` | `If-Match` missing |
-| `422` | `BUSINESS_RULE_VIOLATED` | Editing a `CLOSED` client (CP-BR-08) |
+| `422` | `BUSINESS_RULE_VIOLATED` | Editing a `CLOSED` client (CP-BR-08); changing `externalRef` (CP-BR-01) |
+
+**Field-level rules.** `client:write` in scope covers the profile and contact fields —
+`firstName`, `lastName`, `middleName`, `dateOfBirth`, `email`, `phone`, `taxId`, `address`,
+`preferredChannel`, `segment`. Every other field has an owner that `PATCH` must not bypass:
+
+| Field | Through `PATCH` | Why |
+|---|---|---|
+| `externalRef` | `422`, any caller | Immutable after creation (CP-BR-01) |
+| `teamId` | `403`, any caller | Derived from the owner, never set independently (CP-BR-03) |
+| `ownerManagerId` | `403`, any caller | Belongs to `POST /clients/{id}/reassign`, which requires a reason and moves open tasks (CP-US-05) |
+| `kycStatus` | `403`, any caller | Belongs to `POST /clients/{id}/kyc` and the CP-BR-04 state machine |
+| `risk` | also requires `client:kyc` in scope | A risk rating is a compliance assessment and follows the separation of duties in CP-BR-05 (A-13) |
+| `status` | also requires `client:delete` | Client lifecycle is admin authority; CP-BR-08 already names reopening admin-only (A-13) |
+
+A `CLOSED` client accepts nothing but `{"status": "ACTIVE"}` (CP-BR-08). An explicit `null`
+clears a nullable field (`middleName`, `email`, `taxId`, `address`) and is `400` on any other.
+A patch that changes nothing returns `200` with the current representation, no version bump
+and no event — CP-BR-12's "one event per write" counts writes, not requests. The `409
+VERSION_CONFLICT` body carries decrypted PII in `details[0].current`, so it emits
+`READ_SENSITIVE` exactly as a card read does (CP-BR-13).
 
 ---
 
 #### `POST /clients/{id}/kyc` — KYC transition
 
-**Permission:** `client:kyc` (supervisor, admin, compliance)
+**Permission:** depends on the target (CP-BR-05) — `client:write` in scope to move to `PENDING`;
+`client:kyc` in scope (supervisor, admin, compliance) to set `VERIFIED` or `REJECTED`. `EXPIRED`
+is never a caller's to set: the nightly sweep owns that edge (CP-BR-06).
 
 ```json
 { "targetStatus": "VERIFIED", "verifiedOn": "2026-09-09", "validityMonths": 24, "note": "Passport + utility bill on file" }
 ```
 
-**`200 OK`** — client representation with the new `kyc` block.
+| Field | Rule |
+|---|---|
+| `targetStatus` | Required |
+| `verifiedOn`, `validityMonths` | Required for `VERIFIED`; `kyc_verified_at` is `verifiedOn` at 00:00 UTC and `kyc_expires_at` is that plus `validityMonths` |
+| `reason` | Required for `REJECTED`, stored in `kyc_rejection_reason` |
+| `note` | Optional, ≤ 2000 characters. Stored encrypted in `kyc_note_enc` — free text about identity documents will eventually hold a document number — and returned as `kyc.note` |
+
+Leaving `VERIFIED` clears `kyc_verified_at` and `kyc_expires_at`, so a `PENDING` client never
+shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
+
+**`200 OK`** — client representation; the `kyc` block also carries `rejectionReason` and `note`.
 
 | Status | Code | Cause |
 |---|---|---|
-| `403` | `ROLE_REQUIRED` | Caller is a manager — managers cannot self-approve KYC (CP-BR-05) |
-| `409` | `ILLEGAL_STATE_TRANSITION` | e.g. `NOT_STARTED → VERIFIED` without passing `PENDING` |
-| `422` | `BUSINESS_RULE_VIOLATED` | `targetStatus = REJECTED` with no `reason`; `validityMonths` outside 6–60 |
+| `403` | `ROLE_REQUIRED` | `VERIFIED` or `REJECTED` without `client:kyc` — a manager cannot approve KYC (CP-BR-05) |
+| `403` | `PERMISSION_DENIED` | The caller owns the client; `details[0].reason` is `SELF_APPROVAL_FORBIDDEN` (CP-BR-05) |
+| `404` | `CLIENT_NOT_FOUND` | Out of scope |
+| `409` | `ILLEGAL_STATE_TRANSITION` | A pair outside CP-BR-04, e.g. `NOT_STARTED → VERIFIED`; or `targetStatus = EXPIRED` |
+| `422` | `BUSINESS_RULE_VIOLATED` | `REJECTED` with no `reason`; `VERIFIED` without `verifiedOn` or `validityMonths`; `validityMonths` outside 6–60; `verifiedOn` in the future; a verification whose expiry has already passed |
 
 ---
 
@@ -3157,6 +3193,7 @@ Likewise, the outbox and event envelope ship in the **MVP** even though `audit-s
 | A-10 | Every task belongs to a client. | TR-BR-01. Makes task RBAC derive from client scope with no second mechanism. |
 | A-11 | Minimum client age 18. | Retail banking default. SME clients use the registration date. |
 | A-12 | Currency stored as minor units in `BIGINT`. | No float arithmetic on money, ever. |
+| A-13 | Through `PATCH`, `risk` additionally requires `client:kyc` and `status` requires `client:delete`. | §5.3 named only the manager's `403`, not who may change these. A risk rating is a compliance judgement, so it follows CP-BR-05's separation of duties; client lifecycle is admin authority, and CP-BR-08 already makes reopening admin-only. Mapping to permissions rather than roles keeps rule RB-BR-01. |
 
 ### 12.2 Open questions for the product owner
 
