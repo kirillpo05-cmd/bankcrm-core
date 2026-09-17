@@ -335,6 +335,34 @@ public class ClientRepository {
     }
 
     /**
+     * {@code GET /clients} (§5.3). Scope is applied in the {@code WHERE} clause, not by filtering
+     * rows afterwards: a page of 25 must be 25 clients the caller may see, and a row the caller
+     * has no right to has no business leaving the database (RB-BR-02).
+     *
+     * <p>Ordering comes from {@link SortField}, so no caller-supplied string is ever concatenated
+     * into the statement; {@code id} breaks ties, or a page boundary would drift between requests.
+     */
+    public List<Client> search(ClientSearch criteria, SortField sort, boolean ascending, int limit, int offset) {
+        String direction = ascending ? "ASC" : "DESC";
+        return bind(
+                        jdbc.sql("SELECT " + COLUMNS + " FROM clients " + WHERE
+                                + " ORDER BY " + sort.column() + " " + direction + " NULLS LAST, id ASC"
+                                + " LIMIT :limit OFFSET :offset"),
+                        criteria)
+                .param("limit", limit)
+                .param("offset", offset)
+                .query(this::map)
+                .list();
+    }
+
+    public long countSearch(ClientSearch criteria) {
+        Long count = bind(jdbc.sql("SELECT count(*) FROM clients " + WHERE), criteria)
+                .query(Long.class)
+                .single();
+        return count == null ? 0 : count;
+    }
+
+    /**
      * Follows {@code merged_into_id} to the end of the chain (CP-EC-09). Returns empty when the
      * chain exceeds {@link #MAX_MERGE_HOPS}, which can only mean a cycle — the caller turns that
      * into a 500 with an alert rather than looping.
@@ -402,6 +430,97 @@ public class ClientRepository {
         OffsetDateTime value = rs.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
     }
+
+    /**
+     * Every filter of {@code GET /clients} in one clause. A null filter is expressed in SQL rather
+     * than by assembling a different statement: one plan, and nothing built from what was sent.
+     */
+    private static final String WHERE = """
+            WHERE deleted_at IS NULL
+              AND (CAST(:scopeOwnerId AS uuid) IS NULL OR owner_manager_id = CAST(:scopeOwnerId AS uuid))
+              AND (CAST(:scopeTeamId  AS uuid) IS NULL OR team_id          = CAST(:scopeTeamId  AS uuid))
+              AND (CAST(:ownerId      AS uuid) IS NULL OR owner_manager_id = CAST(:ownerId      AS uuid))
+              AND (CAST(:teamId       AS uuid) IS NULL OR team_id          = CAST(:teamId       AS uuid))
+              AND (CAST(:segment   AS text) IS NULL OR segment::text    = CAST(:segment   AS text))
+              AND (CAST(:status    AS text) IS NULL OR status::text     = CAST(:status    AS text))
+              AND (CAST(:kycStatus AS text) IS NULL OR kyc_status::text = CAST(:kycStatus AS text))
+              AND (CAST(:q AS text) IS NULL
+                   OR lower(first_name || ' ' || last_name) % lower(CAST(:q AS text)))
+              AND (CAST(:expiringDays AS int) IS NULL
+                   OR (kyc_status = 'VERIFIED'
+                       AND kyc_expires_at IS NOT NULL
+                       AND kyc_expires_at < now() + (CAST(:expiringDays AS int) * INTERVAL '1 day')))
+            """;
+
+    private static org.springframework.jdbc.core.simple.JdbcClient.StatementSpec bind(
+            org.springframework.jdbc.core.simple.JdbcClient.StatementSpec spec, ClientSearch criteria) {
+        return spec.param("scopeOwnerId", criteria.scopeOwnerId())
+                .param("scopeTeamId", criteria.scopeTeamId())
+                .param("ownerId", criteria.ownerId())
+                .param("teamId", criteria.teamId())
+                .param(
+                        "segment",
+                        criteria.segment() == null ? null : criteria.segment().name())
+                .param(
+                        "status",
+                        criteria.status() == null ? null : criteria.status().name())
+                .param(
+                        "kycStatus",
+                        criteria.kycStatus() == null
+                                ? null
+                                : criteria.kycStatus().name())
+                .param("q", criteria.q())
+                .param("expiringDays", criteria.kycExpiringWithinDays());
+    }
+
+    /**
+     * The columns {@code GET /clients} may be sorted by (§5.3). An enum rather than a string map
+     * so that the only values reaching {@code ORDER BY} are ones this class wrote.
+     */
+    public enum SortField {
+        LAST_NAME("lastName", "last_name"),
+        CREATED_AT("createdAt", "created_at"),
+        LAST_INTERACTION_AT("lastInteractionAt", "last_interaction_at"),
+        KYC_EXPIRES_AT("kycExpiresAt", "kyc_expires_at");
+
+        private final String apiName;
+        private final String column;
+
+        SortField(String apiName, String column) {
+            this.apiName = apiName;
+            this.column = column;
+        }
+
+        public String apiName() {
+            return apiName;
+        }
+
+        String column() {
+            return column;
+        }
+
+        public static Optional<SortField> byApiName(String name) {
+            return java.util.Arrays.stream(values())
+                    .filter(field -> field.apiName.equals(name))
+                    .findFirst();
+        }
+    }
+
+    /**
+     * The filters of {@code GET /clients}. {@code scopeOwnerId} and {@code scopeTeamId} are the
+     * caller's own visibility, kept apart from the {@code ownerId} and {@code teamId} a caller may
+     * ask for: narrowing a search must never be able to widen what is visible.
+     */
+    public record ClientSearch(
+            String q,
+            ClientSegment segment,
+            ClientStatus status,
+            KycStatus kycStatus,
+            UUID ownerId,
+            UUID teamId,
+            Integer kycExpiringWithinDays,
+            UUID scopeOwnerId,
+            UUID scopeTeamId) {}
 
     /**
      * A validated create, with identifiers already normalized. Normalization happens above this
