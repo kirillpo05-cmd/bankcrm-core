@@ -1,6 +1,7 @@
 package com.client360.client.service;
 
 import com.client360.client.domain.Client;
+import com.client360.client.domain.ClientProduct;
 import com.client360.common.outbox.ChangedFields;
 import com.client360.common.outbox.EventFactory;
 import com.client360.common.outbox.OutboxWriter;
@@ -22,6 +23,9 @@ public class ClientEvents {
 
     public static final String TOPIC = "client.events";
     private static final String ENTITY = "CLIENT";
+
+    /** {@code audit_log.entity_type} is a VARCHAR, so the projection gets its own entity name. */
+    private static final String PRODUCT_ENTITY = "CLIENT_PRODUCT";
 
     private final EventFactory events;
     private final OutboxWriter outbox;
@@ -96,6 +100,49 @@ public class ClientEvents {
                         .action("UPDATE")
                         .changes(diff(before, after))
                         .build());
+    }
+
+    /**
+     * A product recorded from core banking. Rule 3 applies to every mutation, including one on a
+     * projection: "core banking said so" is still an answer the audit trail has to be able to
+     * give, and the entity is the product rather than the client.
+     */
+    public void productAdded(ClientProduct product) {
+        append(
+                product.clientId(),
+                events.event("client.product_added", PRODUCT_ENTITY, product.id())
+                        .clientId(product.clientId())
+                        .action("CREATE")
+                        .changes(productDiff(null, product))
+                        .build());
+    }
+
+    public void productUpdated(ClientProduct before, ClientProduct after) {
+        append(
+                after.clientId(),
+                events.event("client.product_updated", PRODUCT_ENTITY, after.id())
+                        .clientId(after.clientId())
+                        .action("UPDATE")
+                        .changes(productDiff(before, after))
+                        .build());
+    }
+
+    /**
+     * The masked number and the balance are masked again here. Neither is PII on its own, but the
+     * envelope carries {@code clientId} beside them, and "this person holds 12 500 PLN" is exactly
+     * the kind of financial detail rule 1 keeps off the bus. Type, status and the dates stay
+     * readable, so the audit trail can still answer what changed.
+     */
+    private static ChangedFields productDiff(ClientProduct before, ClientProduct after) {
+        return ChangedFields.create()
+                .put("type", before == null ? null : before.type(), after.type())
+                .put("externalProductId", before == null ? null : before.externalProductId(), after.externalProductId())
+                .sensitive("maskedNumber", before == null ? null : before.maskedNumber(), after.maskedNumber())
+                .put("status", before == null ? null : before.status(), after.status())
+                .put("currency", before == null ? null : before.currency(), after.currency())
+                .sensitive("balanceMinor", before == null ? null : before.balanceMinor(), after.balanceMinor())
+                .put("openedOn", before == null ? null : before.openedOn(), after.openedOn())
+                .put("closedOn", before == null ? null : before.closedOn(), after.closedOn());
     }
 
     /**
