@@ -6,6 +6,7 @@ import static com.client360.common.security.Permissions.CLIENT_READ;
 import static com.client360.common.security.Permissions.CLIENT_REASSIGN;
 import static com.client360.common.security.Permissions.CLIENT_WRITE;
 
+import com.client360.client.api.ClientAccessView;
 import com.client360.client.api.ClientAssembler;
 import com.client360.client.api.ClientErrorCodes;
 import com.client360.client.api.ClientListQuery;
@@ -34,6 +35,7 @@ import com.client360.common.api.ApiException;
 import com.client360.common.api.ErrorCodes;
 import com.client360.common.id.UuidV7;
 import com.client360.common.security.CurrentUser;
+import com.client360.common.security.Permissions;
 import com.client360.common.security.Scope;
 import com.client360.common.time.DatabaseClock;
 import com.client360.common.web.OffsetPage;
@@ -259,6 +261,30 @@ public class ClientService {
                 .orElseThrow(() -> versionConflict(requireLive(clients.findById(id), id), caller));
         events.updated(current, saved);
         return assembler.toResponse(saved, caller, clock.now());
+    }
+
+    // ----------------------------------------------------------------- internal
+
+    /**
+     * The authorization question another service asks (§3.1). Returns the client's
+     * authorization-relevant state when the caller holds {@code permission} over it, and
+     * {@code 404} otherwise — the same answer, and the same audit row, as any other out-of-scope
+     * read (ER-01, RB-BR-13).
+     *
+     * <p>No {@code READ_SENSITIVE}: nothing decrypted leaves here, so there is no disclosure to
+     * record (CP-BR-13).
+     */
+    @Transactional
+    public ClientAccessView checkAccess(UUID clientId, String permission, CurrentUser caller) {
+        // A caller-supplied permission code is still input. Anything outside the §9.2.8 matrix is
+        // a bug in the calling service, not a reason to answer a question nobody defined.
+        if (!Permissions.ALL.contains(permission)) {
+            throw ApiException.validation("permission", "must be a permission code from the §9.2.8 matrix");
+        }
+        Client client = requireLive(clients.findById(clientId), clientId);
+        requireCovering(client, caller, permission);
+        return new ClientAccessView(
+                client.id(), client.ownerManagerId(), client.teamId(), client.status(), client.kycStatus());
     }
 
     // --------------------------------------------------------------- ownership

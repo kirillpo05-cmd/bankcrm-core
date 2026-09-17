@@ -915,6 +915,30 @@ added when the service exists.
 
 ---
 
+#### Internal endpoints — how other services ask
+
+`interaction-service` and `audit-service` own no client or user table (§3.1), so the two questions
+they cannot answer themselves are answered here. Both relay the **caller's own bearer token**, not
+a service credential: the decision is about the human making the request, so their identity has to
+survive the hop, and ER-01's `404` passes back through the calling service unchanged.
+
+| Method | Path | Answers |
+|---|---|---|
+| `GET` | `/internal/clients/{id}/access?permission=<code>` | `200` with `{clientId, ownerManagerId, teamId, status, kycStatus}` when the caller holds that permission over the client; `404` when absent or out of scope; `403` when the permission is held at no scope |
+| `GET` | `/internal/users?ids=<uuid>,<uuid>` | `200` with `[{id, fullName}]` — display names for authors and assignees, capped at 100 ids |
+
+Deliberately **not** `GET /clients/{id}`. Authorizing a write to an interaction does not need the
+client's name, email or phone; reusing the card would ship all three between services and write a
+`READ_SENSITIVE` row for a disclosure nobody read (CP-BR-13). What the access view does carry is
+exactly what a caller needs to apply the client's own rules — CP-BR-07 turns on `kycStatus` and
+`status`, CP-BR-08 on `status`.
+
+User names are corporate directory data, not client PII — the same reason `users.email` is a
+plaintext column (§9.2.3) — so any authenticated caller may resolve a name for an id they already
+hold. A directory dump is a different request with a different permission (`user:read`).
+
+---
+
 #### `GET /clients` — scoped list / search
 
 **Permission:** `client:read` (scope-filtered)

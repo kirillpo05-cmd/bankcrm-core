@@ -1,5 +1,7 @@
 package com.client360.client.persistence;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -35,6 +37,30 @@ public class UserRepository {
                         rs.getObject("primary_team_id", UUID.class),
                         rs.getString("status")))
                 .optional();
+    }
+
+    /**
+     * Display names for a set of ids — what another service needs to render an author or an
+     * assignee without owning a user table (§3.1). Bounded by the caller; an empty set is an empty
+     * answer rather than every user in the bank.
+     */
+    public List<UserRef> findAllByIds(Collection<UUID> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                        SELECT id, full_name, email, primary_team_id, status::text AS status
+                          FROM users
+                         WHERE id = ANY (:ids)
+                        """)
+                .param("ids", ids.toArray(UUID[]::new))
+                .query((rs, n) -> new UserRef(
+                        rs.getObject("id", UUID.class),
+                        rs.getString("full_name"),
+                        rs.getString("email"),
+                        rs.getObject("primary_team_id", UUID.class),
+                        rs.getString("status")))
+                .list();
     }
 
     /** Enough of a user to own a client and to render {@code owner} on the card. */
