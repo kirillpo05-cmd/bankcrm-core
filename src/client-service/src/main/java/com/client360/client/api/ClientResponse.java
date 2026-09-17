@@ -8,6 +8,7 @@ import com.client360.client.domain.RiskRating;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -41,6 +42,7 @@ public record ClientResponse(
         Kyc kyc,
         UserSummary owner,
         UUID teamId,
+        List<ProductResponse> products,
         Stats stats,
         Permissions permissions,
         int version,

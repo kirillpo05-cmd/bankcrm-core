@@ -897,9 +897,9 @@ shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| `GET` | `/clients/{id}/products` | `client:read` | `?status=ACTIVE&type=MORTGAGE`; `200` with `[]` when none |
-| `POST` | `/clients/{id}/products` | `product:write` (admin / sync service account) | `201`; `409 PRODUCT_DUPLICATE_EXTERNAL_ID` |
-| `PATCH` | `/clients/{id}/products/{productId}` | `product:write` | `409 VERSION_CONFLICT`, `422` on closing a product with a non-zero balance |
+| `GET` | `/clients/{id}/products` | `client:read` | `?status=ACTIVE&type=MORTGAGE`; `200` with `[]` when none. Emits no `READ_SENSITIVE`: nothing here is decrypted PII, and CP-BR-13 ties the event to a genuine disclosure rather than to every panel that renders |
+| `POST` | `/clients/{id}/products` | `product:write` (admin / sync service account) | `Idempotency-Key` required; `201`; `409 PRODUCT_DUPLICATE_EXTERNAL_ID`; `422` when the client is not cleared for new products (CP-BR-07) |
+| `PATCH` | `/clients/{id}/products/{productId}` | `product:write` | `If-Match` required; `409 VERSION_CONFLICT` with `details[0].current`, `404 PRODUCT_NOT_FOUND`, `422` on closing a product with a non-zero balance |
 | `POST` | `/clients/{id}/products/sync` | `product:sync` | `202 Accepted`; pulls fresh state from core banking; `503 DEPENDENCY_UNAVAILABLE` when the core is down |
 
 ---
@@ -926,7 +926,7 @@ Returns the offset-paginated envelope of card summaries. `sort` accepts `lastNam
 | CP-BR-09 | Soft delete is refused while the client holds an `ACTIVE` product or an open task. Close or reassign first — this prevents orphaning live banking relationships. |
 | CP-BR-10 | **Merge semantics.** The survivor keeps its own `id` and `external_ref`. Interactions, tasks and non-conflicting products re-point via `UPDATE … SET client_id = survivor`. Conflicting products (same `external_product_id`) are skipped and reported in `skipped`. The loser is soft-deleted with `merged_into_id` set; every subsequent read of its ID returns `410` with a `Location` to the survivor. Merges are **not reversible** through the API — a reversal is a DBA runbook. |
 | CP-BR-11 | `last_interaction_at` and `open_task_count` are denormalized counters maintained by the `interaction.events` / `task.events` consumer inside `client-service`. They are display-only and may lag by seconds. **No business decision may read them** — anything authoritative queries `interaction-service` directly. A nightly reconciliation job repairs drift. |
-| CP-BR-12 | Every write emits exactly one event (`client.created`, `client.updated`, `client.deleted`, `client.merged`, `client.kyc_changed`, `client.reassigned`) through the outbox. `changedFields` masks sensitive values per AR-01. |
+| CP-BR-12 | Every write emits exactly one event through the outbox: `client.created`, `client.updated`, `client.deleted`, `client.merged`, `client.kyc_changed`, `client.reassigned`, and on the product projection `client.product_added` and `client.product_updated` (`entity.type = CLIENT_PRODUCT`, keyed by `client_id` like the rest). `changedFields` masks sensitive values per AR-01 — on a product that means `maskedNumber` and `balanceMinor`, because the envelope carries `clientId` beside them. A request that changes nothing writes nothing and emits nothing: the rule counts writes, not requests. |
 | CP-BR-13 | Reading a client card emits a `READ_SENSITIVE` audit event **only when decrypted PII is actually returned** — i.e. not for masked search results. This keeps the audit table from being flooded by list views while still recording every genuine PII disclosure. |
 | CP-BR-14 | Minimum age 18 is enforced by DB constraint and validated at the API edge for a better message. Corporate clients (`segment = 'SME'`) use the registration date as `date_of_birth`; the constraint holds. |
 

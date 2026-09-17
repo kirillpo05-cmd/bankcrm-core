@@ -29,13 +29,17 @@ public class MatrixAccessPolicy implements AccessPolicy {
             "MANAGER",
             Map.of(
                     Permissions.CLIENT_READ, Scope.OWN,
-                    Permissions.CLIENT_WRITE, Scope.OWN),
+                    Permissions.CLIENT_WRITE, Scope.OWN,
+                    Permissions.PRODUCT_READ, Scope.OWN,
+                    Permissions.PRODUCT_SYNC, Scope.OWN),
             "SUPERVISOR",
             Map.of(
                     Permissions.CLIENT_READ, Scope.TEAM,
                     Permissions.CLIENT_WRITE, Scope.TEAM,
                     Permissions.CLIENT_REASSIGN, Scope.TEAM,
-                    Permissions.CLIENT_KYC, Scope.TEAM),
+                    Permissions.CLIENT_KYC, Scope.TEAM,
+                    Permissions.PRODUCT_READ, Scope.TEAM,
+                    Permissions.PRODUCT_SYNC, Scope.TEAM),
             "ADMIN",
             Map.of(
                     Permissions.CLIENT_READ, Scope.ALL,
@@ -43,14 +47,18 @@ public class MatrixAccessPolicy implements AccessPolicy {
                     Permissions.CLIENT_DELETE, Scope.ALL,
                     Permissions.CLIENT_REASSIGN, Scope.ALL,
                     Permissions.CLIENT_MERGE, Scope.ALL,
-                    Permissions.CLIENT_KYC, Scope.ALL),
+                    Permissions.CLIENT_KYC, Scope.ALL,
+                    Permissions.PRODUCT_READ, Scope.ALL,
+                    Permissions.PRODUCT_WRITE, Scope.ALL,
+                    Permissions.PRODUCT_SYNC, Scope.ALL),
             "AUDITOR",
-            Map.of(Permissions.CLIENT_READ, Scope.ALL),
+            Map.of(Permissions.CLIENT_READ, Scope.ALL, Permissions.PRODUCT_READ, Scope.ALL),
             "COMPLIANCE",
             Map.of(
                     Permissions.CLIENT_READ, Scope.ALL,
                     Permissions.CLIENT_KYC, Scope.ALL,
-                    Permissions.CLIENT_ERASE, Scope.ALL));
+                    Permissions.CLIENT_ERASE, Scope.ALL,
+                    Permissions.PRODUCT_READ, Scope.ALL));
 
     /** RB-BR-03: several roles granting one permission yield the widest scope among them. */
     @Override

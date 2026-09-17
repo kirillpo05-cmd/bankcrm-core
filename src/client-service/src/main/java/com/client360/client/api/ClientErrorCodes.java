@@ -15,6 +15,7 @@ public final class ClientErrorCodes {
     public static final String CLIENT_DUPLICATE_EMAIL = "CLIENT_DUPLICATE_EMAIL";
     public static final String CLIENT_DUPLICATE_TAX_ID = "CLIENT_DUPLICATE_TAX_ID";
     public static final String PRODUCT_DUPLICATE_EXTERNAL_ID = "PRODUCT_DUPLICATE_EXTERNAL_ID";
+    public static final String PRODUCT_NOT_FOUND = "PRODUCT_NOT_FOUND";
     public static final String USER_NOT_FOUND = "USER_NOT_FOUND";
 
     /**
