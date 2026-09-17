@@ -8,9 +8,11 @@ import static com.client360.common.security.Permissions.CLIENT_WRITE;
 
 import com.client360.client.api.ClientAssembler;
 import com.client360.client.api.ClientErrorCodes;
+import com.client360.client.api.ClientListQuery;
 import com.client360.client.api.ClientPatch;
 import com.client360.client.api.ClientPatch.Field;
 import com.client360.client.api.ClientResponse;
+import com.client360.client.api.ClientSummaryResponse;
 import com.client360.client.api.CreateClientRequest;
 import com.client360.client.api.KycTransitionRequest;
 import com.client360.client.api.LookupResponse;
@@ -22,7 +24,9 @@ import com.client360.client.domain.ClientStatus;
 import com.client360.client.domain.KycStatus;
 import com.client360.client.persistence.ClientProductRepository;
 import com.client360.client.persistence.ClientRepository;
+import com.client360.client.persistence.ClientRepository.ClientSearch;
 import com.client360.client.persistence.ClientRepository.NewClient;
+import com.client360.client.persistence.ClientRepository.SortField;
 import com.client360.client.persistence.UserRepository;
 import com.client360.client.support.Emails;
 import com.client360.client.support.PhoneNumbers;
@@ -32,10 +36,12 @@ import com.client360.common.id.UuidV7;
 import com.client360.common.security.CurrentUser;
 import com.client360.common.security.Scope;
 import com.client360.common.time.DatabaseClock;
+import com.client360.common.web.OffsetPage;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -473,6 +479,114 @@ public class ClientService {
                 .detail("from", from.name(), "to", to.name());
     }
 
+    // --------------------------------------------------------------------- list
+
+    /**
+     * {@code GET /clients} (§5.3): the scoped admin list behind the search screen.
+     *
+     * <p>Scope is pushed into the query rather than applied to the rows that come back. Filtering
+     * afterwards would make a page of 25 mean "25 rows read, some of which you may see", and would
+     * lift records out of the database that the caller has no right to (RB-BR-02).
+     *
+     * <p>Offset pagination is right here and wrong for the timeline: this list is bounded and
+     * sortable, while an interaction feed drifts under concurrent writes (§4.5).
+     */
+    @Transactional(readOnly = true)
+    public OffsetPage<ClientSummaryResponse> list(ClientListQuery query, CurrentUser caller) {
+        Scope scope = access.requireScope(caller, CLIENT_READ);
+        int page = requirePage(query.page());
+        int size = requireSize(query.size());
+        Sorting sorting = parseSort(query.sort());
+
+        UUID scopeOwnerId = scope == Scope.OWN ? caller.id() : null;
+        UUID scopeTeamId = null;
+        if (scope == Scope.TEAM) {
+            Optional<UUID> team = access.teamOf(caller);
+            if (team.isEmpty()) {
+                // TEAM scope with no team resolves to nothing. Leaving the filter off would quietly
+                // widen the search to every client, which is the opposite of what the scope says.
+                return new OffsetPage<>(List.of(), page, size, 0, 0, false);
+            }
+            scopeTeamId = team.get();
+        }
+
+        ClientSearch criteria = new ClientSearch(
+                blankToNull(query.q()),
+                query.segment(),
+                query.status(),
+                query.kycStatus(),
+                query.ownerId(),
+                query.teamId(),
+                requireExpiringDays(query.kycExpiringWithinDays()),
+                scopeOwnerId,
+                scopeTeamId);
+
+        long total = clients.countSearch(criteria);
+        List<ClientSummaryResponse> content =
+                clients.search(criteria, sorting.field(), sorting.ascending(), size, page * size).stream()
+                        // Everything returned is in scope by construction, and contacts stay masked: a
+                        // list is not a card, so it discloses nothing and audits nothing (CP-BR-13).
+                        .map(client -> assembler.toSummary(client, true))
+                        .toList();
+        int totalPages = (int) Math.ceil((double) total / size);
+        return new OffsetPage<>(content, page, size, total, totalPages, (long) (page + 1) * size < total);
+    }
+
+    private static int requirePage(Integer page) {
+        if (page == null) {
+            return 0;
+        }
+        if (page < 0) {
+            throw ApiException.validation("page", "must be zero or greater");
+        }
+        return page;
+    }
+
+    private static int requireSize(Integer size) {
+        if (size == null) {
+            return OffsetPage.DEFAULT_SIZE;
+        }
+        if (size < 1 || size > OffsetPage.MAX_SIZE) {
+            throw ApiException.validation("size", "must be between 1 and " + OffsetPage.MAX_SIZE);
+        }
+        return size;
+    }
+
+    private static Integer requireExpiringDays(Integer days) {
+        if (days != null && days < 1) {
+            throw ApiException.validation("kycExpiringWithinDays", "must be one or more");
+        }
+        return days;
+    }
+
+    /** {@code sort=lastName,desc}. An unknown field is {@code 400}, never a silent default. */
+    private static Sorting parseSort(String sort) {
+        if (sort == null || sort.isBlank()) {
+            return new Sorting(SortField.LAST_NAME, true);
+        }
+        String[] parts = sort.split(",", -1);
+        SortField field = SortField.byApiName(parts[0].trim())
+                .orElseThrow(() -> ApiException.validation(
+                        "sort",
+                        "must be one of "
+                                + Arrays.stream(SortField.values())
+                                        .map(SortField::apiName)
+                                        .toList()));
+        if (parts.length == 1) {
+            return new Sorting(field, true);
+        }
+        if (parts.length > 2) {
+            throw ApiException.validation("sort", "expected <field> or <field>,asc|desc");
+        }
+        return switch (parts[1].trim().toLowerCase(Locale.ROOT)) {
+            case "asc" -> new Sorting(field, true);
+            case "desc" -> new Sorting(field, false);
+            default -> throw ApiException.validation("sort", "direction must be asc or desc");
+        };
+    }
+
+    private record Sorting(SortField field, boolean ascending) {}
+
     // ------------------------------------------------------------------- lookup
 
     /**
@@ -497,7 +611,7 @@ public class ClientService {
                     case NAME -> clients.searchByName(query.value(), LOOKUP_LIMIT);
                 };
 
-        List<LookupResponse.Match> matches = new ArrayList<>();
+        List<ClientSummaryResponse> matches = new ArrayList<>();
         boolean disclosedOutOfScope = false;
         for (Client client : found) {
             boolean inScope = access.covers(scope, client, caller);
@@ -509,7 +623,7 @@ public class ClientService {
                 }
                 disclosedOutOfScope = true;
             }
-            matches.add(assembler.toMatch(client, inScope));
+            matches.add(assembler.toSummary(client, inScope));
         }
         if (disclosedOutOfScope) {
             // Telling a caller that a record exists is itself a disclosure, and it is the entry

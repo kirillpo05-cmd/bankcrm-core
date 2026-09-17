@@ -1,9 +1,13 @@
 package com.client360.client.api;
 
+import com.client360.client.domain.ClientSegment;
+import com.client360.client.domain.ClientStatus;
+import com.client360.client.domain.KycStatus;
 import com.client360.client.service.ClientService;
 import com.client360.common.idempotency.IdempotencyService;
 import com.client360.common.security.CurrentUser;
 import com.client360.common.web.ETags;
+import com.client360.common.web.OffsetPage;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import java.net.URI;
@@ -43,7 +47,7 @@ public class ClientController {
     }
 
     /**
-     * {@code POST /clients} (CP-US-03).
+     * {@code POST /clients} (§5.3).
      *
      * <p>The header is bound as optional so a missing key becomes {@code 400 VALIDATION_FAILED}
      * naming {@code Idempotency-Key} (§4.6), rather than the generic missing-header error.
@@ -59,6 +63,28 @@ public class ClientController {
                     .header(HttpHeaders.ETAG, ETags.of(created.version()))
                     .body(created);
         });
+    }
+
+    /**
+     * {@code GET /clients} (§5.3) — the scoped admin list. Offset-paginated because it is bounded
+     * and sortable; the interaction timeline and the audit log keyset instead (§4.5).
+     */
+    @GetMapping
+    public OffsetPage<ClientSummaryResponse> list(
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) ClientSegment segment,
+            @RequestParam(required = false) ClientStatus status,
+            @RequestParam(required = false) KycStatus kycStatus,
+            @RequestParam(required = false) UUID ownerId,
+            @RequestParam(required = false) UUID teamId,
+            @RequestParam(required = false) Integer kycExpiringWithinDays,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String sort,
+            CurrentUser caller) {
+        ClientListQuery query = new ClientListQuery(
+                q, segment, status, kycStatus, ownerId, teamId, kycExpiringWithinDays, page, size, sort);
+        return clients.list(query, caller);
     }
 
     /**

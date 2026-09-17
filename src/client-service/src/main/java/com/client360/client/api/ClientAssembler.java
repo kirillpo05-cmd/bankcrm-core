@@ -80,9 +80,9 @@ public class ClientAssembler {
                 client.updatedAt());
     }
 
-    /** A search hit: identity enough to disambiguate, contacts masked (CP-BR-13). */
-    public LookupResponse.Match toMatch(Client client, boolean inScope) {
-        return new LookupResponse.Match(
+    /** A list row: identity enough to disambiguate, contacts masked (CP-BR-13). */
+    public ClientSummaryResponse toSummary(Client client, boolean inScope) {
+        return new ClientSummaryResponse(
                 client.id(),
                 client.displayName(),
                 client.externalRef(),
