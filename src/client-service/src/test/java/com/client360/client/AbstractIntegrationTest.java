@@ -54,6 +54,9 @@ public abstract class AbstractIntegrationTest {
     protected static final UUID SOFIA_ADAMSKA = UUID.fromString("3f000000-0000-4000-8000-000000000006");
     protected static final UUID EWA_ZGODNOSC = UUID.fromString("3f000000-0000-4000-8000-000000000008");
 
+    /** Deactivated, so RB-BR-07 and "reassign to a leaver" have something to fail against. */
+    protected static final UUID BARTOSZ_BYLY = UUID.fromString("3f000000-0000-4000-8000-000000000009");
+
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
             .withDatabaseName("client360")
             .withUsername("client360")
@@ -197,6 +200,15 @@ public abstract class AbstractIntegrationTest {
         insertUser(ADAM_NOWAK, "EMP-1002", "a.nowak@bank.example", "Adam Nowak", TEAM_RWN);
         insertUser(PIOTR_KOWALCZYK, "EMP-1004", "p.kowalczyk@bank.example", "Piotr Kowalczyk", TEAM_RWS);
         insertUser(EWA_ZGODNOSC, "EMP-1008", "e.zgodnosc@bank.example", "Ewa Zgodność", null);
+        // ck_users_deactivated_pair wants the status and the timestamp to agree within the row,
+        // so this one cannot go through insertUser.
+        jdbc.sql("""
+                        INSERT INTO client.users
+                            (id, employee_no, email, full_name, password_hash, status, primary_team_id, deactivated_at)
+                        VALUES (:id, 'EMP-1009', 'b.byly@bank.example', 'Bartosz Były', '{noop}local-dev-only',
+                                'DEACTIVATED', NULL, now() - INTERVAL '30 days')
+                        ON CONFLICT (id) DO NOTHING
+                        """).param("id", BARTOSZ_BYLY).update();
         insertUser(MARTA_LEWANDOWSKA, "EMP-1003", "m.lewandowska@bank.example", "Marta Lewandowska", TEAM_RWN);
         insertUser(JAN_ZIELINSKI, "EMP-1005", "j.zielinski@bank.example", "Jan Zieliński", TEAM_RWS);
         // Cross-team role: no primary team, which is what makes CP-BR-03 unsatisfiable for them.

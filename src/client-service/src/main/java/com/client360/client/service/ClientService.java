@@ -3,6 +3,7 @@ package com.client360.client.service;
 import static com.client360.common.security.Permissions.CLIENT_DELETE;
 import static com.client360.common.security.Permissions.CLIENT_KYC;
 import static com.client360.common.security.Permissions.CLIENT_READ;
+import static com.client360.common.security.Permissions.CLIENT_REASSIGN;
 import static com.client360.common.security.Permissions.CLIENT_WRITE;
 
 import com.client360.client.api.ClientAssembler;
@@ -14,9 +15,12 @@ import com.client360.client.api.CreateClientRequest;
 import com.client360.client.api.KycTransitionRequest;
 import com.client360.client.api.LookupResponse;
 import com.client360.client.api.LookupResponse.MatchType;
+import com.client360.client.api.ReassignRequest;
+import com.client360.client.api.ReassignResponse;
 import com.client360.client.domain.Client;
 import com.client360.client.domain.ClientStatus;
 import com.client360.client.domain.KycStatus;
+import com.client360.client.persistence.ClientProductRepository;
 import com.client360.client.persistence.ClientRepository;
 import com.client360.client.persistence.ClientRepository.NewClient;
 import com.client360.client.persistence.UserRepository;
@@ -53,7 +57,11 @@ public class ClientService {
 
     private static final int MIN_QUERY_LENGTH = 3;
 
+    /** §5.3: a reason that explains nothing is the same as no reason at all. */
+    private static final int MIN_REASON_LENGTH = 10;
+
     private final ClientRepository clients;
+    private final ClientProductRepository products;
     private final UserRepository users;
     private final ClientAccess access;
     private final ClientEvents events;
@@ -63,6 +71,7 @@ public class ClientService {
 
     public ClientService(
             ClientRepository clients,
+            ClientProductRepository products,
             UserRepository users,
             ClientAccess access,
             ClientEvents events,
@@ -70,6 +79,7 @@ public class ClientService {
             PhoneNumbers phones,
             DatabaseClock clock) {
         this.clients = clients;
+        this.products = products;
         this.users = users;
         this.access = access;
         this.events = events;
@@ -243,6 +253,101 @@ public class ClientService {
                 .orElseThrow(() -> versionConflict(requireLive(clients.findById(id), id), caller));
         events.updated(current, saved);
         return assembler.toResponse(saved, caller, clock.now());
+    }
+
+    // --------------------------------------------------------------- ownership
+
+    /**
+     * CP-US-05: coverage survives holidays and departures. The team is re-derived from the new
+     * owner in the same transaction, never set independently (CP-BR-03).
+     */
+    @Transactional
+    public ReassignResponse reassign(UUID id, ReassignRequest request, CurrentUser caller) {
+        Client current = requireLive(clients.findById(id), id);
+        Scope scope = access.scopeOf(caller, CLIENT_REASSIGN)
+                .orElseThrow(() -> deny(
+                        current,
+                        CLIENT_REASSIGN,
+                        ApiException.forbidden(
+                                        ErrorCodes.PERMISSION_DENIED,
+                                        "Reassigning a client requires the " + CLIENT_REASSIGN + " permission.")
+                                .detail("permission", CLIENT_REASSIGN)));
+        if (!access.covers(scope, current, caller)) {
+            events.recordDenial(current.id(), CLIENT_REASSIGN);
+            throw ClientAccess.notFound();
+        }
+
+        String reason = requireReason(request.reason(), "reason");
+        UserRepository.UserRef newOwner = users.findById(request.newOwnerManagerId())
+                .filter(UserRepository.UserRef::isActive)
+                .orElseThrow(() -> ApiException.notFound(
+                        ClientErrorCodes.USER_NOT_FOUND, "That manager does not exist or is deactivated."));
+
+        if (newOwner.id().equals(current.ownerManagerId())) {
+            throw ApiException.businessRule("This client already belongs to that manager.")
+                    .detail("field", "newOwnerManagerId", "issue", "already the owner");
+        }
+        // CP-BR-03 has no team to derive without one, so the move would leave the client teamless.
+        if (newOwner.primaryTeamId() == null) {
+            throw ApiException.businessRule("The new owner has no primary team, so the client would have none.")
+                    .detail("field", "newOwnerManagerId", "issue", "user has no primary team");
+        }
+        // A supervisor covers their own team, in both directions: they may not push a client onto
+        // a manager they do not supervise.
+        if (scope == Scope.TEAM
+                && !access.teamOf(caller)
+                        .map(team -> team.equals(newOwner.primaryTeamId()))
+                        .orElse(false)) {
+            throw deny(
+                    current,
+                    CLIENT_REASSIGN,
+                    ApiException.forbidden(
+                                    ErrorCodes.SCOPE_VIOLATION, "That manager is outside the team you supervise.")
+                            .detail("field", "newOwnerManagerId", "issue", "outside your team"));
+        }
+
+        Client saved = clients.reassign(id, newOwner.id(), newOwner.primaryTeamId(), current.version(), caller.id())
+                .orElseThrow(() -> versionConflict(requireLive(clients.findById(id), id), caller));
+        events.reassigned(current, saved, reason);
+        // Tasks live in interaction-service, which has no code yet, so nothing can have followed
+        // the client. The count is reported rather than omitted so the shape does not change later.
+        return new ReassignResponse(assembler.toResponse(saved, caller, clock.now()), 0);
+    }
+
+    /**
+     * §4.9 soft delete. The row stays so audit rows keep resolving; every read path filters on
+     * {@code deleted_at IS NULL}, so the client is gone as far as the API is concerned.
+     */
+    @Transactional
+    public void softDelete(UUID id, int expectedVersion, String rawReason, CurrentUser caller) {
+        Client current = requireLive(clients.findById(id), id);
+        Scope scope = access.scopeOf(caller, CLIENT_DELETE)
+                .orElseThrow(() -> deny(
+                        current,
+                        CLIENT_DELETE,
+                        ApiException.forbidden(
+                                        ErrorCodes.ROLE_REQUIRED,
+                                        "Deleting a client requires the " + CLIENT_DELETE + " permission.")
+                                .detail("permission", CLIENT_DELETE)));
+        if (!access.covers(scope, current, caller)) {
+            events.recordDenial(current.id(), CLIENT_DELETE);
+            throw ClientAccess.notFound();
+        }
+
+        String reason = requireReason(rawReason, "reason");
+        if (current.version() != expectedVersion) {
+            throw versionConflict(current, caller);
+        }
+        // CP-BR-09: deleting a client who still holds a live banking relationship would orphan it.
+        // Close or reassign first.
+        if (products.hasActiveProduct(id)) {
+            throw ApiException.businessRule("This client holds an active product; close it first (CP-BR-09).")
+                    .detail("blocker", "activeProducts");
+        }
+
+        Client deleted = clients.softDelete(id, expectedVersion, caller.id(), reason)
+                .orElseThrow(() -> versionConflict(requireLive(clients.findById(id), id), caller));
+        events.deleted(deleted, reason);
     }
 
     // ---------------------------------------------------------------------- kyc
@@ -523,6 +628,19 @@ public class ClientService {
         return ApiException.forbidden(
                         ErrorCodes.PERMISSION_DENIED, "This client is outside your " + permission + " scope.")
                 .detail("permission", permission);
+    }
+
+    /**
+     * CP-US-05 and §4.9 both take a reason, and both answer a short one with {@code 422} rather
+     * than {@code 400}: the field is present and well-formed, it just does not do its job.
+     */
+    private static String requireReason(String value, String field) {
+        String reason = blankToNull(value);
+        if (reason == null || reason.length() < MIN_REASON_LENGTH) {
+            throw ApiException.businessRule("A reason of at least " + MIN_REASON_LENGTH + " characters is required.")
+                    .detail("field", field, "issue", "must be at least " + MIN_REASON_LENGTH + " characters");
+        }
+        return reason;
     }
 
     private static String trimmed(String value) {

@@ -10,6 +10,7 @@ import java.net.URI;
 import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -104,6 +105,36 @@ public class ClientController {
         return ResponseEntity.ok()
                 .header(HttpHeaders.ETAG, ETags.of(updated.version()))
                 .body(updated);
+    }
+
+    /**
+     * {@code POST /clients/{id}/reassign} (CP-US-05).
+     *
+     * <p>No {@code If-Match}: a reassignment is not an edit of the fields the caller was looking
+     * at, and a supervisor covering for an absent colleague should not be blocked because someone
+     * corrected a phone number a moment earlier.
+     */
+    @PostMapping("/{id}/reassign")
+    public ResponseEntity<ReassignResponse> reassign(
+            @PathVariable UUID id, @Valid @RequestBody ReassignRequest request, CurrentUser caller) {
+        ReassignResponse reassigned = clients.reassign(id, request, caller);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.ETAG, ETags.of(reassigned.client().version()))
+                .body(reassigned);
+    }
+
+    /**
+     * {@code DELETE /clients/{id}} — soft delete (§4.9). {@code If-Match} is required: this is
+     * destructive, so the caller must prove they are acting on the record they last saw.
+     */
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(
+            @PathVariable UUID id,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
+            @RequestParam(required = false) String reason,
+            CurrentUser caller) {
+        clients.softDelete(id, ETags.requireIfMatch(ifMatch), reason, caller);
+        return ResponseEntity.noContent().build();
     }
 
     /**

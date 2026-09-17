@@ -848,7 +848,14 @@ shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
 |---|---|---|
 | `403` | `SCOPE_VIOLATION` | Supervisor targeting a manager outside their team |
 | `404` | `USER_NOT_FOUND` | `newOwnerManagerId` unknown or deactivated |
-| `422` | `BUSINESS_RULE_VIOLATED` | New owner equals current owner; new owner lacks the `MANAGER` role; `reason` under 10 characters |
+| `422` | `BUSINESS_RULE_VIOLATED` | New owner equals current owner; new owner has no primary team, so CP-BR-03 has nothing to derive from; new owner lacks the `MANAGER` role; `reason` under 10 characters |
+
+Two parts of this endpoint wait on tables that do not exist yet, and both fail open rather than
+pretending: the **`MANAGER` role check** needs `user_roles`, which ships with RBAC in v2, so today
+any active user with a primary team may receive a client; and **`transferOpenTasks`** is accepted
+and answered with `"tasksTransferred": 0`, because tasks live in interaction-service and nothing
+can have followed the client. The count is reported rather than omitted so the response shape does
+not change when it starts being true.
 
 ---
 
@@ -889,7 +896,11 @@ shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
 | Status | Code | Cause |
 |---|---|---|
 | `403` | `ROLE_REQUIRED` | Not an admin |
-| `422` | `BUSINESS_RULE_VIOLATED` | Client holds an `ACTIVE` product, or has open tasks (CP-BR-09) |
+| `422` | `BUSINESS_RULE_VIOLATED` | Client holds an `ACTIVE` product, or has open tasks (CP-BR-09); `reason` under 10 characters |
+
+Only the product half of CP-BR-09 is enforced today: open tasks live in interaction-service, which
+has no code yet, so there is nothing to ask. The check belongs on this side of the call and is
+added when the service exists.
 
 ---
 
