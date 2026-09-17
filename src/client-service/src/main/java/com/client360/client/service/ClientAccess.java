@@ -89,6 +89,14 @@ public class ClientAccess {
         return ApiException.notFound(ClientErrorCodes.CLIENT_NOT_FOUND, "Client not found or not in your scope.");
     }
 
+    /**
+     * The caller's own team, for rules that compare it against someone else's — reassigning a
+     * client to a manager outside the supervisor's team, for instance (CP-US-05).
+     */
+    public Optional<UUID> teamOf(CurrentUser caller) {
+        return callerTeam(caller);
+    }
+
     private Optional<UUID> callerTeam(CurrentUser caller) {
         return users.findById(caller.id()).map(UserRepository.UserRef::primaryTeamId);
     }

@@ -103,6 +103,36 @@ public class ClientEvents {
     }
 
     /**
+     * CP-US-05. The reason travels in {@code context}, not {@code changedFields}: it explains the
+     * move rather than describing a column, and "why did this client change hands" is the question
+     * a supervisor asks a year later.
+     */
+    public void reassigned(Client before, Client after, String reason) {
+        append(
+                after.id(),
+                events.event("client.reassigned", ENTITY, after.id())
+                        .clientId(after.id())
+                        .action("UPDATE")
+                        .changes(diff(before, after))
+                        .context("reason", reason)
+                        .build());
+    }
+
+    /**
+     * §4.9 soft delete. The row survives — audit rows reference {@code client_id} and must stay
+     * resolvable — so this records the intent, not a disappearance.
+     */
+    public void deleted(Client client, String reason) {
+        append(
+                client.id(),
+                events.event("client.deleted", ENTITY, client.id())
+                        .clientId(client.id())
+                        .action("DELETE")
+                        .context("reason", reason)
+                        .build());
+    }
+
+    /**
      * A product recorded from core banking. Rule 3 applies to every mutation, including one on a
      * projection: "core banking said so" is still an answer the audit trail has to be able to
      * give, and the entity is the product rather than the client.
@@ -167,7 +197,13 @@ public class ClientEvents {
                 .put("kycVerifiedAt", before.kycVerifiedAt(), after.kycVerifiedAt())
                 .put("kycExpiresAt", before.kycExpiresAt(), after.kycExpiresAt())
                 .sensitive("kycRejectionReason", before.kycRejectionReason(), after.kycRejectionReason())
-                .sensitive("kycNote", before.kycNote(), after.kycNote());
+                .sensitive("kycNote", before.kycNote(), after.kycNote())
+                // Ownership changes only through reassignment, but it belongs here rather than in
+                // that one event: "who holds this client, and since when" is the question the
+                // audit trail is asked, and an event that recorded only the reason could not
+                // answer it. They are staff ids, not client data, so they stay readable.
+                .put("ownerManagerId", before.ownerManagerId(), after.ownerManagerId())
+                .put("teamId", before.teamId(), after.teamId());
     }
 
     /**

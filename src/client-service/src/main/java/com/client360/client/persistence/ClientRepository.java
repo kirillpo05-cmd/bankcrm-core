@@ -191,6 +191,58 @@ public class ClientRepository {
                 .optional();
     }
 
+    /**
+     * CP-US-05. Ownership moves through its own statement rather than through {@link #update},
+     * which deliberately cannot touch these columns: a reassignment carries a reason, re-derives
+     * the team from the new owner in the same transaction (CP-BR-03), and must never happen as a
+     * side effect of a contact-details edit.
+     */
+    public Optional<Client> reassign(UUID id, UUID newOwnerId, UUID newTeamId, int expectedVersion, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            owner_manager_id = :ownerId,
+                            team_id          = :teamId,
+                            version          = version + 1,
+                            updated_at       = now(),
+                            updated_by       = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("ownerId", newOwnerId)
+                .param("teamId", newTeamId)
+                .param("expectedVersion", expectedVersion)
+                .param("actor", actorId)
+                .query(this::map)
+                .optional();
+    }
+
+    /**
+     * §4.9 soft delete. The row stays: audit rows reference {@code client_id} and must remain
+     * resolvable for seven years, and an erasure overwrites the sensitive columns rather than
+     * dropping the record (CP-EC-12). Every read path filters on {@code deleted_at IS NULL}, so
+     * from the API's point of view the client is gone.
+     */
+    public Optional<Client> softDelete(UUID id, int expectedVersion, UUID actorId, String reason) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            deleted_at      = now(),
+                            deleted_by      = :actor,
+                            deletion_reason = :reason,
+                            version         = version + 1,
+                            updated_at      = now(),
+                            updated_by      = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("expectedVersion", expectedVersion)
+                .param("actor", actorId)
+                .param("reason", reason)
+                .query(this::map)
+                .optional();
+    }
+
     // -------------------------------------------------------------------- reads
 
     /**
