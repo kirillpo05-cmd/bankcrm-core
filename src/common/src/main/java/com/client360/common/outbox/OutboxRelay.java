@@ -81,8 +81,7 @@ public class OutboxRelay {
     /** @return the number of rows published */
     public int publishBatch() {
         Integer published = tx.execute(status -> {
-            List<Row> rows = jdbc.sql(
-                            """
+            List<Row> rows = jdbc.sql("""
                             SELECT id, event_id, event_type, topic, partition_key, payload::text AS payload
                               FROM outbox_events
                              WHERE published_at IS NULL
@@ -107,7 +106,8 @@ public class OutboxRelay {
                     recordFailure(row, e);
                     break;
                 }
-                jdbc.sql("UPDATE outbox_events SET published_at = now(), attempts = LEAST(attempts + 1, 100), last_error = NULL WHERE id = :id")
+                jdbc.sql(
+                                "UPDATE outbox_events SET published_at = now(), attempts = LEAST(attempts + 1, 100), last_error = NULL WHERE id = :id")
                         .param("id", row.id())
                         .update();
                 sent++;
@@ -120,17 +120,15 @@ public class OutboxRelay {
     @Scheduled(fixedDelayString = "${client360.outbox.metrics-interval:10s}")
     public void refreshMetrics() {
         try {
-            jdbc.sql(
-                            """
+            jdbc.sql("""
                             SELECT count(*) AS depth,
                                    COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::bigint AS age
                               FROM outbox_events
                              WHERE published_at IS NULL
-                            """)
-                    .query(rs -> {
-                        depth.set(rs.getLong("depth"));
-                        oldestAgeSeconds.set(rs.getLong("age"));
-                    });
+                            """).query(rs -> {
+                depth.set(rs.getLong("depth"));
+                oldestAgeSeconds.set(rs.getLong("age"));
+            });
         } catch (RuntimeException e) {
             log.debug("outbox metrics refresh failed", e);
         }
@@ -152,7 +150,10 @@ public class OutboxRelay {
         if (error.length() > 1000) {
             error = error.substring(0, 1000);
         }
-        log.warn("outbox publish failed for event {} ({}); batch stopped to preserve ordering", row.eventId(), row.eventType());
+        log.warn(
+                "outbox publish failed for event {} ({}); batch stopped to preserve ordering",
+                row.eventId(),
+                row.eventType());
         jdbc.sql("UPDATE outbox_events SET attempts = LEAST(attempts + 1, 100), last_error = :error WHERE id = :id")
                 .param("error", error)
                 .param("id", row.id())

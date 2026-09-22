@@ -25,7 +25,11 @@ public record RequestMetadata(String requestId, String ip, String userAgent, Str
             userAgent = userAgent.substring(0, USER_AGENT_MAX);
         }
         return Optional.of(new RequestMetadata(
-                RequestIds.current(), request.getRemoteAddr(), userAgent, request.getMethod(), request.getRequestURI()));
+                RequestIds.current(),
+                request.getRemoteAddr(),
+                userAgent,
+                request.getMethod(),
+                request.getRequestURI()));
     }
 
     /** {@code "PATCH /api/v1/clients/9b21…"} — method and path, never the query string. */

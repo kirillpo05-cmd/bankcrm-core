@@ -20,7 +20,8 @@ public final class ETags {
      */
     public static int requireIfMatch(String ifMatch) {
         if (ifMatch == null || ifMatch.isBlank()) {
-            throw ApiException.preconditionRequired("If-Match is required on this write. Send the ETag from your last read.");
+            throw ApiException.preconditionRequired(
+                    "If-Match is required on this write. Send the ETag from your last read.");
         }
         String value = ifMatch.trim();
         if (value.startsWith("W/")) {

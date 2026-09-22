@@ -94,7 +94,8 @@ public class EventFactory {
                             user.primaryRole(),
                             request == null ? null : request.ip(),
                             request == null ? null : request.userAgent());
-            UUID requestId = request == null || request.requestId() == null ? null : UUID.fromString(request.requestId());
+            UUID requestId =
+                    request == null || request.requestId() == null ? null : UUID.fromString(request.requestId());
             Map<String, Object> fullContext = new LinkedHashMap<>();
             if (request != null) {
                 fullContext.put("endpoint", request.endpoint());

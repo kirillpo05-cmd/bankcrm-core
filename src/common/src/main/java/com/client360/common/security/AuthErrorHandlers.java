@@ -32,12 +32,18 @@ public class AuthErrorHandlers implements AuthenticationEntryPoint, AccessDenied
             throws IOException {
         response.setHeader(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
         if (request.getHeader(HttpHeaders.AUTHORIZATION) == null) {
-            errors.write(request, response, HttpStatus.UNAUTHORIZED, ErrorCodes.TOKEN_MISSING, "Authentication required.");
+            errors.write(
+                    request, response, HttpStatus.UNAUTHORIZED, ErrorCodes.TOKEN_MISSING, "Authentication required.");
         } else if (isExpired(ex)) {
             errors.write(
-                    request, response, HttpStatus.UNAUTHORIZED, ErrorCodes.TOKEN_EXPIRED, "Access token expired. Refresh and retry.");
+                    request,
+                    response,
+                    HttpStatus.UNAUTHORIZED,
+                    ErrorCodes.TOKEN_EXPIRED,
+                    "Access token expired. Refresh and retry.");
         } else {
-            errors.write(request, response, HttpStatus.UNAUTHORIZED, ErrorCodes.TOKEN_INVALID, "Access token is invalid.");
+            errors.write(
+                    request, response, HttpStatus.UNAUTHORIZED, ErrorCodes.TOKEN_INVALID, "Access token is invalid.");
         }
     }
 
@@ -51,7 +57,8 @@ public class AuthErrorHandlers implements AuthenticationEntryPoint, AccessDenied
         for (Throwable t = ex; t != null; t = t.getCause()) {
             if (t instanceof JwtValidationException validation) {
                 return validation.getErrors().stream()
-                        .anyMatch(e -> e.getDescription() != null && e.getDescription().startsWith("Jwt expired"));
+                        .anyMatch(e ->
+                                e.getDescription() != null && e.getDescription().startsWith("Jwt expired"));
             }
         }
         return false;

@@ -32,7 +32,8 @@ public record OffsetPage<T>(List<T> content, int page, int size, long totalEleme
      * Builds a page request from {@code ?page=0&size=25&sort=createdAt,desc}. The sort field must
      * be one of {@code sortable} (API name → entity property); anything else is {@code 400}.
      */
-    public static PageRequest request(Integer page, Integer size, String sort, Map<String, String> sortable, Sort fallback) {
+    public static PageRequest request(
+            Integer page, Integer size, String sort, Map<String, String> sortable, Sort fallback) {
         int p = page == null ? 0 : page;
         int s = size == null ? DEFAULT_SIZE : size;
         if (p < 0) {
@@ -47,7 +48,8 @@ public record OffsetPage<T>(List<T> content, int page, int size, long totalEleme
         String[] parts = sort.split(",", -1);
         String property = sortable.get(parts[0].trim());
         if (property == null || parts.length > 2) {
-            throw ApiException.validation("sort", "must be one of " + sortable.keySet() + ", optionally followed by ,asc or ,desc");
+            throw ApiException.validation(
+                    "sort", "must be one of " + sortable.keySet() + ", optionally followed by ,asc or ,desc");
         }
         Sort.Direction direction = Sort.Direction.ASC;
         if (parts.length == 2) {

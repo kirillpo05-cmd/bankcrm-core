@@ -35,8 +35,7 @@ public class OutboxWriter {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Cannot serialize event " + envelope.eventType(), e);
         }
-        jdbc.sql(
-                        """
+        jdbc.sql("""
                         INSERT INTO outbox_events
                             (event_id, aggregate_type, aggregate_id, event_type, topic, partition_key, payload)
                         VALUES (:eventId, :aggregateType, :aggregateId, :eventType, :topic, :partitionKey, CAST(:payload AS jsonb))

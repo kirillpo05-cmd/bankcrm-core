@@ -75,7 +75,8 @@ public class SecurityConfig implements WebMvcConfigurer {
                 .headers(headers -> headers.contentSecurityPolicy(
                                 csp -> csp.policyDirectives("default-src 'none'; frame-ancestors 'none'"))
                         .referrerPolicy(referrer -> referrer.policy(ReferrerPolicy.NO_REFERRER))
-                        .httpStrictTransportSecurity(hsts -> hsts.includeSubDomains(true).maxAgeInSeconds(31_536_000)));
+                        .httpStrictTransportSecurity(
+                                hsts -> hsts.includeSubDomains(true).maxAgeInSeconds(31_536_000)));
         return http.build();
     }
 
@@ -84,9 +85,10 @@ public class SecurityConfig implements WebMvcConfigurer {
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withPublicKey(loadPublicKey(properties, resourceLoader))
                 .signatureAlgorithm(SignatureAlgorithm.RS256)
                 .build();
-        OAuth2TokenValidator<Jwt> defaults = properties.issuer() == null || properties.issuer().isBlank()
-                ? JwtValidators.createDefault()
-                : JwtValidators.createDefaultWithIssuer(properties.issuer());
+        OAuth2TokenValidator<Jwt> defaults =
+                properties.issuer() == null || properties.issuer().isBlank()
+                        ? JwtValidators.createDefault()
+                        : JwtValidators.createDefaultWithIssuer(properties.issuer());
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(defaults, SecurityConfig::subjectIsUserId));
         return decoder;
     }
@@ -130,7 +132,8 @@ public class SecurityConfig implements WebMvcConfigurer {
     static RSAPublicKey loadPublicKey(JwtProperties properties, ResourceLoader resourceLoader) {
         String pem = properties.publicKey();
         if ((pem == null || pem.isBlank()) && properties.publicKeyLocation() != null) {
-            try (InputStream in = resourceLoader.getResource(properties.publicKeyLocation()).getInputStream()) {
+            try (InputStream in =
+                    resourceLoader.getResource(properties.publicKeyLocation()).getInputStream()) {
                 pem = new String(in.readAllBytes(), StandardCharsets.US_ASCII);
             } catch (IOException e) {
                 throw new IllegalStateException(

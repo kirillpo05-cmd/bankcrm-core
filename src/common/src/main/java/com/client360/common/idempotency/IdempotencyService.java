@@ -62,7 +62,11 @@ public class IdempotencyService {
     private final LookupHasher hasher;
 
     public IdempotencyService(
-            JdbcClient jdbc, TransactionTemplate tx, ObjectMapper objectMapper, FieldCipher cipher, LookupHasher hasher) {
+            JdbcClient jdbc,
+            TransactionTemplate tx,
+            ObjectMapper objectMapper,
+            FieldCipher cipher,
+            LookupHasher hasher) {
         this.jdbc = jdbc;
         this.tx = tx;
         this.objectMapper = objectMapper;
@@ -109,14 +113,12 @@ public class IdempotencyService {
     public void purgeExpired() {
         int deleted;
         do {
-            deleted = jdbc.sql(
-                            """
+            deleted = jdbc.sql("""
                             DELETE FROM idempotency_keys
                              WHERE ctid IN (SELECT ctid FROM idempotency_keys
                                              WHERE created_at < now() - INTERVAL '24 hours'
                                              LIMIT 1000)
-                            """)
-                    .update();
+                            """).update();
         } while (deleted == 1000);
     }
 
@@ -138,8 +140,7 @@ public class IdempotencyService {
      */
     private boolean claim(UUID userId, String endpoint, UUID key, byte[] payloadHash) {
         jdbc.sql("SET LOCAL lock_timeout = '2s'").update();
-        Optional<Integer> claimed = jdbc.sql(
-                        """
+        Optional<Integer> claimed = jdbc.sql("""
                         INSERT INTO idempotency_keys (user_id, endpoint, idempotency_key, payload_hash)
                         VALUES (:userId, :endpoint, :key, :hash)
                         ON CONFLICT (user_id, endpoint, idempotency_key) DO UPDATE
@@ -163,8 +164,7 @@ public class IdempotencyService {
     }
 
     private ResponseEntity<Object> replay(UUID userId, String endpoint, UUID key, byte[] payloadHash) {
-        Stored stored = jdbc.sql(
-                        """
+        Stored stored = jdbc.sql("""
                         SELECT payload_hash, response_status, response_headers::text AS headers,
                                response_body_enc, key_version
                           FROM idempotency_keys
@@ -190,7 +190,8 @@ public class IdempotencyService {
         readHeaders(stored.headersJson()).forEach(headers::set);
         headers.set(REPLAYED_HEADER, "true");
         headers.setContentType(MediaType.APPLICATION_JSON);
-        JsonNode body = stored.bodyEnc() == null ? null : parse(cipher.decrypt(stored.bodyEnc(), stored.keyVersion(), AAD));
+        JsonNode body =
+                stored.bodyEnc() == null ? null : parse(cipher.decrypt(stored.bodyEnc(), stored.keyVersion(), AAD));
         return ResponseEntity.status(stored.status()).headers(headers).body(body);
     }
 
@@ -205,8 +206,7 @@ public class IdempotencyService {
         String body;
         try {
             body = response.getBody() == null ? null : objectMapper.writeValueAsString(response.getBody());
-            jdbc.sql(
-                            """
+            jdbc.sql("""
                             UPDATE idempotency_keys
                                SET response_status   = :status,
                                    response_headers  = CAST(:headers AS jsonb),

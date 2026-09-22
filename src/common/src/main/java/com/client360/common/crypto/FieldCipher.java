@@ -48,10 +48,14 @@ public class FieldCipher {
         random.nextBytes(nonce);
         try {
             Cipher cipher = Cipher.getInstance(TRANSFORMATION);
-            cipher.init(Cipher.ENCRYPT_MODE, keys.dataKey(keys.currentVersion()), new GCMParameterSpec(TAG_BITS, nonce));
+            cipher.init(
+                    Cipher.ENCRYPT_MODE, keys.dataKey(keys.currentVersion()), new GCMParameterSpec(TAG_BITS, nonce));
             cipher.updateAAD(aad.getBytes(StandardCharsets.UTF_8));
             byte[] sealed = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
-            return ByteBuffer.allocate(NONCE_BYTES + sealed.length).put(nonce).put(sealed).array();
+            return ByteBuffer.allocate(NONCE_BYTES + sealed.length)
+                    .put(nonce)
+                    .put(sealed)
+                    .array();
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES-GCM encryption failed", e);
         }

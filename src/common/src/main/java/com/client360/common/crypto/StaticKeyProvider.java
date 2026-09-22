@@ -50,8 +50,8 @@ public class StaticKeyProvider implements KeyProvider {
             throw new IllegalStateException(property + " is not valid base64");
         }
         if (bytes.length < minBytes || bytes.length > maxBytes) {
-            throw new IllegalStateException(
-                    property + " must decode to " + (minBytes == maxBytes ? minBytes : "at least " + minBytes) + " bytes");
+            throw new IllegalStateException(property + " must decode to "
+                    + (minBytes == maxBytes ? minBytes : "at least " + minBytes) + " bytes");
         }
         return bytes;
     }

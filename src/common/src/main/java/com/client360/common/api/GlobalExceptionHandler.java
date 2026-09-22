@@ -131,7 +131,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(KeyUnavailableException.class)
     ResponseEntity<ErrorResponse> keyUnavailable(KeyUnavailableException ex) {
         log.error("encryption key unavailable", ex);
-        return ErrorResponses.entity(ApiException.dependencyUnavailable("Encryption service unavailable. Retry shortly."));
+        return ErrorResponses.entity(
+                ApiException.dependencyUnavailable("Encryption service unavailable. Retry shortly."));
     }
 
     @ExceptionHandler({
@@ -178,16 +179,18 @@ public class GlobalExceptionHandler {
         ConstraintError mapped = constraint == null ? null : constraintErrors.get(constraint);
         if (mapped != null) {
             log.info("write rejected by constraint {} (sqlstate {})", constraint, sqlState);
-            return ErrorResponses.entity(
-                    new ApiException(mapped.status(), mapped.code(), mapped.message()).detail("constraint", constraint));
+            return ErrorResponses.entity(new ApiException(mapped.status(), mapped.code(), mapped.message())
+                    .detail("constraint", constraint));
         }
         ApiException api =
                 switch (sqlState) {
                     case "23505" -> {
                         log.error("unmapped unique constraint {} — add it to the service's registry", constraint);
-                        yield ApiException.conflict(ErrorCodes.RESOURCE_DUPLICATE, "A conflicting record already exists.");
+                        yield ApiException.conflict(
+                                ErrorCodes.RESOURCE_DUPLICATE, "A conflicting record already exists.");
                     }
-                    case "23502" -> ApiException.badRequest(ErrorCodes.VALIDATION_FAILED, "A required value is missing.");
+                    case "23502" ->
+                        ApiException.badRequest(ErrorCodes.VALIDATION_FAILED, "A required value is missing.");
                     // 23514 check_violation — including the temporal triggers of SPEC §4.12 — and
                     // 23503 foreign_key_violation are both domain-rule failures.
                     default -> ApiException.businessRule("The change violates a data rule.");

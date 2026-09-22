@@ -40,23 +40,47 @@ public final class Permissions {
     public static final String ACCESS_APPROVE = "access:approve";
 
     public static final Set<String> ALL = Set.of(
-            CLIENT_READ, CLIENT_WRITE, CLIENT_DELETE, CLIENT_REASSIGN, CLIENT_MERGE, CLIENT_KYC, CLIENT_ERASE,
-            PRODUCT_READ, PRODUCT_WRITE, PRODUCT_SYNC,
-            INTERACTION_READ, INTERACTION_WRITE, INTERACTION_DELETE,
-            TICKET_READ, TICKET_WRITE,
-            TASK_READ, TASK_WRITE, TASK_REASSIGN,
+            CLIENT_READ,
+            CLIENT_WRITE,
+            CLIENT_DELETE,
+            CLIENT_REASSIGN,
+            CLIENT_MERGE,
+            CLIENT_KYC,
+            CLIENT_ERASE,
+            PRODUCT_READ,
+            PRODUCT_WRITE,
+            PRODUCT_SYNC,
+            INTERACTION_READ,
+            INTERACTION_WRITE,
+            INTERACTION_DELETE,
+            TICKET_READ,
+            TICKET_WRITE,
+            TASK_READ,
+            TASK_WRITE,
+            TASK_REASSIGN,
             DASHBOARD_TEAM,
-            AUDIT_READ, AUDIT_EXPORT, AUDIT_VERIFY,
-            USER_READ, USER_WRITE, ROLE_ASSIGN, TEAM_MANAGE,
-            ACCESS_REQUEST, ACCESS_APPROVE);
+            AUDIT_READ,
+            AUDIT_EXPORT,
+            AUDIT_VERIFY,
+            USER_READ,
+            USER_WRITE,
+            ROLE_ASSIGN,
+            TEAM_MANAGE,
+            ACCESS_REQUEST,
+            ACCESS_APPROVE);
 
     /** The MANAGER column of §9.2.8 — every code the role holds, at any scope. */
     public static final Set<String> MANAGER = Set.of(
-            CLIENT_READ, CLIENT_WRITE,
-            PRODUCT_READ, PRODUCT_SYNC,
-            INTERACTION_READ, INTERACTION_WRITE,
-            TICKET_READ, TICKET_WRITE,
-            TASK_READ, TASK_WRITE,
+            CLIENT_READ,
+            CLIENT_WRITE,
+            PRODUCT_READ,
+            PRODUCT_SYNC,
+            INTERACTION_READ,
+            INTERACTION_WRITE,
+            TICKET_READ,
+            TICKET_WRITE,
+            TASK_READ,
+            TASK_WRITE,
             ACCESS_REQUEST);
 
     private Permissions() {}

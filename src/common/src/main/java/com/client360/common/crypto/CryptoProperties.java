@@ -12,4 +12,5 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param keyVersion the version recorded in {@code key_version} for new ciphertext
  */
 @ConfigurationProperties("client360.crypto")
-public record CryptoProperties(String dataKey, String pepper, @DefaultValue("1") short keyVersion) {}
+public record CryptoProperties(
+        String dataKey, String pepper, @DefaultValue("1") short keyVersion) {}

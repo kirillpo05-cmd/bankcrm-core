@@ -21,7 +21,6 @@ public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolve
             ModelAndViewContainer mavContainer,
             NativeWebRequest webRequest,
             WebDataBinderFactory binderFactory) {
-        return CurrentUsers.find()
-                .orElseThrow(() -> new InsufficientAuthenticationException("No authenticated user"));
+        return CurrentUsers.find().orElseThrow(() -> new InsufficientAuthenticationException("No authenticated user"));
     }
 }

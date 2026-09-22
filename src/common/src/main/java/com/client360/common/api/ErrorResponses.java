@@ -31,7 +31,13 @@ public class ErrorResponses {
             HttpStatus status, String code, String message, List<Map<String, Object>> details) {
         return new ErrorResponse(
                 // Response metadata, not a stored business timestamp: rule 7 does not apply.
-                Instant.now(), status.value(), status.name(), code, message, RequestIds.current(), List.copyOf(details));
+                Instant.now(),
+                status.value(),
+                status.name(),
+                code,
+                message,
+                RequestIds.current(),
+                List.copyOf(details));
     }
 
     public static ResponseEntity<ErrorResponse> entity(ApiException ex) {

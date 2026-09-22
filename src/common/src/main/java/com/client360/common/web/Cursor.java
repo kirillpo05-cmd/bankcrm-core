@@ -23,7 +23,9 @@ public record Cursor(Instant ts, UUID id) {
 
     public String encode() {
         ObjectNode node = JSON.createObjectNode().put("ts", ts.toString()).put("id", id.toString());
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(node.toString().getBytes(StandardCharsets.UTF_8));
+        return Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(node.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     /** {@code null} when no cursor was supplied; {@code 400 INVALID_CURSOR} when it is malformed. */
@@ -33,9 +35,12 @@ public record Cursor(Instant ts, UUID id) {
         }
         try {
             JsonNode node = JSON.readTree(Base64.getUrlDecoder().decode(encoded));
-            return new Cursor(Instant.parse(node.get("ts").asText()), UUID.fromString(node.get("id").asText()));
+            return new Cursor(
+                    Instant.parse(node.get("ts").asText()),
+                    UUID.fromString(node.get("id").asText()));
         } catch (Exception e) {
-            throw ApiException.badRequest(ErrorCodes.INVALID_CURSOR, "The cursor is malformed or expired. Restart from the first page.");
+            throw ApiException.badRequest(
+                    ErrorCodes.INVALID_CURSOR, "The cursor is malformed or expired. Restart from the first page.");
         }
     }
 }
