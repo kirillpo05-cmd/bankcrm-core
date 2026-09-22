@@ -1,0 +1,90 @@
+# Everything CLAUDE.md → "Definition of done" asks for, run by a machine instead of by memory.
+#
+# The build runs on Java 21 — the version the parent pom declares, not whatever JDK a
+# contributor happens to have on PATH — so a 22+ API slipping into the source is caught here
+# rather than by the first person who builds on the declared target.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build + Testcontainers
+    runs-on: ubuntu-latest
+    # Two PostgreSQL containers (one per service module) plus the full suite. Generous, but a
+    # hung container should fail the run rather than occupy a runner for six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # `verify`, not `test`: the Testcontainers integration tests are the ones that exercise the
+      # CHECK constraints, the temporal triggers and the partial indexes. A run that skipped them
+      # would report green on a schema it never applied.
+      - name: ./mvnw verify
+        run: ./mvnw -B -ntp verify
+
+  migrations:
+    name: migrations are forward-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history: the immutability check diffs against the pull request's merge base.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # .claude/rules/db-migrations.md: "Never edit a migration that has run anywhere, including
+      # a teammate's local stack. Fix forward with a new migration." Flyway stores a checksum per
+      # applied file, so an edited V*.sql does not re-run — it makes every existing database
+      # refuse to migrate. Prose could not enforce this; a diff can.
+      - name: No edit to an existing migration
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          touched=$(git diff --name-status --diff-filter=MDR \
+            "$BASE_SHA"...HEAD -- 'db/migrations/**/V*.sql')
+          if [ -n "$touched" ]; then
+            echo "::error::A migration that already exists on the base branch was modified, deleted or renamed."
+            echo "$touched"
+            echo "Migrations are immutable once merged. Add a new V<n>__*.sql instead."
+            exit 1
+          fi
+          echo "No existing migration was touched."
+
+      # Two branches that each add V7__ merge cleanly and then fail at startup, in whichever
+      # environment deploys first. Version numbers are the one thing a merge cannot reconcile.
+      - name: One migration per version
+        run: |
+          set -euo pipefail
+          status=0
+          for dir in db/migrations/*/; do
+            dupes=$(find "$dir" -maxdepth 1 -name 'V*.sql' -printf '%f\n' \
+              | sed -E 's/^(V[0-9]+)__.*/\1/' | sort | uniq -d)
+            if [ -n "$dupes" ]; then
+              echo "::error::${dir} declares the same version twice: $(echo "$dupes" | tr '\n' ' ')"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Every migration version is unique."
