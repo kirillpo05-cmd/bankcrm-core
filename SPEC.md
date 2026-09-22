@@ -1344,6 +1344,14 @@ because every note has text.
 
 Empty timeline → `200` with `"content": []`.
 
+Filter semantics: `type` repeats and is OR'd; `from` is inclusive and `to` exclusive, so
+consecutive windows neither overlap nor leave a gap; `q` is a case-insensitive **substring** of the
+subject with the caller's `%`, `_` and `\` escaped — a percent sign typed into the search box is a
+percent sign, not a wildcard. "The auditor/admin role" is asked as `audit:read` at `ALL` scope, which
+auditors, admins and compliance hold and supervisors (at `TEAM`) do not (RB-BR-01). With
+`includeDeleted`, a removed row carries `deleted: true`, `deletedAt`, `deletedBy` and
+`deletionReason` so it can be shown struck through and labelled.
+
 ---
 
 #### `GET /interactions/{id}` — full detail
@@ -1431,7 +1439,14 @@ amending what you may not read is writing blind.
 | Status | Code | Cause |
 |---|---|---|
 | `403` | `ROLE_REQUIRED` | Managers cannot delete interactions at all — that is the whole point of an audit trail |
-| `422` | `BUSINESS_RULE_VIOLATED` | The interaction has a linked open task; close or unlink first |
+| `404` | `INTERACTION_NOT_FOUND` | Absent, already deleted, out of scope, or someone else's private note a supervisor cannot see |
+| `409` | `VERSION_CONFLICT` | Stale `If-Match`; `details[0].current` omits the body where the caller may not read it (IL-BR-09) |
+| `422` | `BUSINESS_RULE_VIOLATED` | The interaction has a linked open task; close or unlink first; `reason` under 10 characters |
+
+`ROLE_REQUIRED` is answered before the interaction is looked up: it depends on the caller alone, so
+an unknown id and a known one get the same reply. The linked-open-task check waits on §7 — tasks
+live in this service but have no code yet, so there is nothing to ask; it lands with them. The
+reason travels in the `interaction.deleted` event's `context`.
 
 ---
 

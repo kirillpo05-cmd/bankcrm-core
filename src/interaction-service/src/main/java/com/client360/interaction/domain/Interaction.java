@@ -36,7 +36,9 @@ public record Interaction(
         int version,
         Instant createdAt,
         Instant updatedAt,
-        Instant deletedAt) {
+        Instant deletedAt,
+        UUID deletedBy,
+        String deletionReason) {
 
     /**
      * IL-BR-02. Measured from {@code createdAt}, not {@code occurredAt}: the window exists to let
@@ -94,5 +96,9 @@ public record Interaction(
 
     public boolean isCorrection() {
         return correctsId != null;
+    }
+
+    public boolean isDeleted() {
+        return deletedAt != null;
     }
 }

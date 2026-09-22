@@ -105,6 +105,20 @@ public class InteractionEvents {
     }
 
     /**
+     * §6.3 soft delete. The reason travels in {@code context}: it explains the removal rather than
+     * describing a column, and "who removed this, and why" is what an auditor asks.
+     */
+    public void deleted(Interaction interaction, String reason) {
+        append(
+                interaction.clientId(),
+                events.event("interaction.deleted", ENTITY, interaction.id())
+                        .clientId(interaction.clientId())
+                        .action("DELETE")
+                        .context("reason", reason)
+                        .build());
+    }
+
+    /**
      * IL-BR-11: opening a full body is a disclosure and is audited; scrolling the timeline, which
      * returns a preview, is not.
      */

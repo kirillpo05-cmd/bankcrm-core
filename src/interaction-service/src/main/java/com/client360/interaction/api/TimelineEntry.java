@@ -23,6 +23,8 @@ import java.util.UUID;
  * @param hasCorrection set on an original that has been corrected, so the feed renders the pair
  *     together with this one visibly superseded (IL-BR-03)
  * @param edited the wording was changed inside the author's window (IL-BR-02)
+ * @param deleted only ever true in an auditor's {@code includeDeleted} view, where the row is shown
+ *     struck through with who removed it and why (§6.3)
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record TimelineEntry(
@@ -40,9 +42,13 @@ public record TimelineEntry(
         UUID correctsId,
         boolean hasCorrection,
         boolean edited,
-        Instant createdAt) {
+        Instant createdAt,
+        boolean deleted,
+        Instant deletedAt,
+        UserSummary deletedBy,
+        String deletionReason) {
 
-    public static TimelineEntry of(TimelineRow row, UserSummary author, UUID viewerId) {
+    public static TimelineEntry of(TimelineRow row, UserSummary author, UserSummary deletedBy, UUID viewerId) {
         Interaction interaction = row.interaction();
         return new TimelineEntry(
                 interaction.id(),
@@ -59,6 +65,10 @@ public record TimelineEntry(
                 interaction.correctsId(),
                 row.hasCorrection(),
                 interaction.isEdited(),
-                interaction.createdAt());
+                interaction.createdAt(),
+                interaction.isDeleted(),
+                interaction.deletedAt(),
+                deletedBy,
+                interaction.deletionReason());
     }
 }

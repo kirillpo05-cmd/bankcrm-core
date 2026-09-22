@@ -1,5 +1,6 @@
 package com.client360.interaction.service;
 
+import static com.client360.common.security.Permissions.AUDIT_READ;
 import static com.client360.common.security.Permissions.INTERACTION_DELETE;
 import static com.client360.common.security.Permissions.INTERACTION_READ;
 import static com.client360.common.security.Permissions.INTERACTION_WRITE;
@@ -19,6 +20,7 @@ import com.client360.interaction.api.InteractionErrorCodes;
 import com.client360.interaction.api.InteractionResponse;
 import com.client360.interaction.api.InteractionResponse.CorrectionSummary;
 import com.client360.interaction.api.TimelineEntry;
+import com.client360.interaction.api.TimelineFilter;
 import com.client360.interaction.api.UserSummary;
 import com.client360.interaction.client.ClientAccessClient;
 import com.client360.interaction.client.ClientAccessView;
@@ -47,6 +49,9 @@ public class InteractionService {
     private static final int DEFAULT_LIMIT = 50;
 
     private static final int MAX_LIMIT = 100;
+
+    /** §6.3: a reason that explains nothing is the same as no reason at all. */
+    private static final int MIN_REASON_LENGTH = 10;
 
     private final InteractionRepository interactions;
     private final ClientAccessClient clientAccess;
@@ -119,23 +124,56 @@ public class InteractionService {
      */
     @Transactional(readOnly = true)
     public KeysetPage<TimelineEntry> timeline(
-            UUID clientId, InteractionType type, String cursor, Integer limit, CurrentUser caller) {
+            UUID clientId, TimelineFilter filter, String cursor, Integer limit, CurrentUser caller) {
         clientAccess.require(clientId, INTERACTION_READ);
         int pageSize = requireLimit(limit);
+        if (filter.from() != null && filter.to() != null && filter.from().isAfter(filter.to())) {
+            throw ApiException.validation("from", "must not be after to");
+        }
+        // §6.3: struck-through rows are for auditors and admins, who hold audit:read at ALL. A
+        // supervisor holds it at TEAM and a manager not at all — asked as permission plus scope,
+        // never as a role name (RB-BR-01).
+        if (filter.includeDeleted() && !accessPolicy.holdsAtScopeAll(caller, AUDIT_READ)) {
+            throw ApiException.forbidden(
+                            ErrorCodes.PERMISSION_DENIED,
+                            "Deleted interactions are visible to auditors and admins only.")
+                    .detail("field", "includeDeleted", "permission", AUDIT_READ);
+        }
 
         List<TimelineRow> rows = interactions.timeline(
-                new TimelineQuery(clientId, type, Cursor.decode(cursor), caller.id(), isAdmin(caller)),
+                new TimelineQuery(
+                        clientId,
+                        filter.types(),
+                        filter.from(),
+                        filter.to(),
+                        filter.authorId(),
+                        filter.q(),
+                        filter.includeDeleted(),
+                        Cursor.decode(cursor),
+                        caller.id(),
+                        isAdmin(caller)),
                 // One extra row answers "is there more" without a second count over a growing feed.
                 pageSize + 1);
 
         boolean hasMore = rows.size() > pageSize;
         List<TimelineRow> page = hasMore ? rows.subList(0, pageSize) : rows;
-        Map<UUID, UserSummary> authors = directory.byIds(
-                page.stream().map(row -> row.interaction().authorId()).toList());
+        List<UUID> people = new java.util.ArrayList<>();
+        page.forEach(row -> {
+            people.add(row.interaction().authorId());
+            if (row.interaction().deletedBy() != null) {
+                people.add(row.interaction().deletedBy());
+            }
+        });
+        Map<UUID, UserSummary> names = directory.byIds(people);
 
         List<TimelineEntry> content = page.stream()
-                .map(row ->
-                        TimelineEntry.of(row, author(authors, row.interaction().authorId()), caller.id()))
+                .map(row -> TimelineEntry.of(
+                        row,
+                        author(names, row.interaction().authorId()),
+                        row.interaction().deletedBy() == null
+                                ? null
+                                : author(names, row.interaction().deletedBy()),
+                        caller.id()))
                 .toList();
         Interaction last = page.isEmpty() ? null : page.getLast().interaction();
         String nextCursor = hasMore && last != null ? new Cursor(last.occurredAt(), last.id()).encode() : null;
@@ -163,6 +201,50 @@ public class InteractionService {
         events.readSensitive(interaction, withBody ? "interaction.body" : "interaction.private_metadata");
         return InteractionResponse.of(
                 interaction, withBody, directory.byId(interaction.authorId()), correctionsOf(interaction), null);
+    }
+
+    // ------------------------------------------------------------------- delete
+
+    /**
+     * §6.3 soft delete. The row stays: audit rows reference it and corrections may point at it.
+     * It leaves the feed and survives in an auditor's {@code includeDeleted} view, struck through.
+     *
+     * <p>Managers cannot delete at all — "that is the whole point of an audit trail" — so the
+     * permission is asked first and answered {@code 403 ROLE_REQUIRED} before anything is looked
+     * up. It depends on the caller alone and reveals nothing about which interactions exist.
+     *
+     * <p>§6.3 also refuses a delete while the interaction has a linked open task. Tasks live in this
+     * service but have no code yet (§7), so there is nothing to check; the rule lands with them.
+     */
+    @Transactional
+    public void delete(UUID id, int expectedVersion, String rawReason, CurrentUser caller) {
+        if (accessPolicy.scopeOf(caller, INTERACTION_DELETE).isEmpty()) {
+            throw ApiException.forbidden(
+                            ErrorCodes.ROLE_REQUIRED,
+                            "Deleting an interaction requires the interaction:delete permission.")
+                    .detail("permission", INTERACTION_DELETE);
+        }
+        Interaction current = interactions.findById(id).orElseThrow(InteractionService::notFound);
+        clientAccess.require(current.clientId(), INTERACTION_DELETE);
+        if (!current.isVisibleTo(caller.id(), isAdmin(caller))) {
+            events.recordDenial(current.clientId(), id, INTERACTION_DELETE);
+            throw notFound();
+        }
+
+        String reason = rawReason == null ? "" : rawReason.trim();
+        if (reason.length() < MIN_REASON_LENGTH) {
+            throw ApiException.businessRule("A reason of at least " + MIN_REASON_LENGTH + " characters is required.")
+                    .detail("field", "reason", "issue", "must be at least " + MIN_REASON_LENGTH + " characters");
+        }
+        if (current.version() != expectedVersion) {
+            throw versionConflict(current, caller);
+        }
+
+        Interaction deleted = interactions
+                .softDelete(id, expectedVersion, caller.id(), reason)
+                .orElseThrow(() ->
+                        versionConflict(interactions.findById(id).orElseThrow(InteractionService::notFound), caller));
+        events.deleted(deleted, reason);
     }
 
     // --------------------------------------------------------------- amendments
@@ -339,17 +421,23 @@ public class InteractionService {
     }
 
     /**
-     * §4.8: the current state rides in {@code details[0].current} so the author's typing is not
-     * thrown away. It is the author's own text, so this is not a disclosure to audit.
+     * §4.8: the current state rides in {@code details[0].current} so the caller's work is not thrown
+     * away. The body is included only if the caller may read it: a conflict is still a response,
+     * and an admin who hits one deleting someone's private note must not receive the text IL-BR-09
+     * keeps from them.
      */
     private ApiException versionConflict(Interaction current, CurrentUser caller) {
         return ApiException.conflict(
                         ErrorCodes.VERSION_CONFLICT,
-                        "This interaction was changed by someone else. Review the current text and retry.")
+                        "This interaction was changed by someone else. Review the current state and retry.")
                 .detail(Map.of(
                         "current",
                         InteractionResponse.of(
-                                current, true, authorOf(current.authorId(), caller), correctionsOf(current), null)));
+                                current,
+                                current.canReadBodyAs(caller.id()),
+                                authorOf(current.authorId(), caller),
+                                correctionsOf(current),
+                                null)));
     }
 
     private void validate(CreateInteractionRequest request, ClientAccessView client) {

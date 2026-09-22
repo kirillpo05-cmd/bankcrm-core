@@ -203,17 +203,35 @@ public abstract class AbstractInteractionIntegrationTest {
     public static class Doubles {
 
         /**
-         * {@code MvpAccessPolicy} makes everyone a MANAGER, which cannot express IL-BR-09 — the rule
-         * only means something when one caller is an admin and another is not. ADMIN holds every
-         * permission at ALL, as in the §9.2.8 matrix; everyone else is the MVP manager.
+         * {@code MvpAccessPolicy} makes everyone a MANAGER, which cannot express IL-BR-09 or the
+         * delete and {@code includeDeleted} rules of §6.3 — each only means something when callers
+         * differ. The rows below follow the §9.2.8 matrix for the permissions this service asks.
          */
         @Bean
         @Primary
         com.client360.common.security.AccessPolicy accessPolicy() {
             com.client360.common.security.AccessPolicy manager = new com.client360.common.security.MvpAccessPolicy();
-            return (user, permission) -> user.roles().contains("ADMIN")
-                    ? java.util.Optional.of(com.client360.common.security.Scope.ALL)
-                    : manager.scopeOf(user, permission);
+            java.util.Set<String> auditorAll = java.util.Set.of(
+                    com.client360.common.security.Permissions.INTERACTION_READ,
+                    com.client360.common.security.Permissions.AUDIT_READ,
+                    com.client360.common.security.Permissions.CLIENT_READ);
+            java.util.Set<String> supervisorTeamExtra = java.util.Set.of(
+                    com.client360.common.security.Permissions.INTERACTION_DELETE,
+                    com.client360.common.security.Permissions.AUDIT_READ);
+            return (user, permission) -> {
+                if (user.roles().contains("ADMIN")) {
+                    return java.util.Optional.of(com.client360.common.security.Scope.ALL);
+                }
+                if (user.roles().contains("AUDITOR")) {
+                    return auditorAll.contains(permission)
+                            ? java.util.Optional.of(com.client360.common.security.Scope.ALL)
+                            : java.util.Optional.empty();
+                }
+                if (user.roles().contains("SUPERVISOR") && supervisorTeamExtra.contains(permission)) {
+                    return java.util.Optional.of(com.client360.common.security.Scope.TEAM);
+                }
+                return manager.scopeOf(user, permission);
+            };
         }
 
         @Bean

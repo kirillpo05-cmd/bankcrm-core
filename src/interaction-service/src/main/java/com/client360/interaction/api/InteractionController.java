@@ -9,9 +9,12 @@ import com.client360.interaction.service.InteractionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -55,18 +58,41 @@ public class InteractionController {
     }
 
     /**
-     * {@code GET /clients/{clientId}/interactions} (IL-US-01) — the timeline, newest first.
-     * Keyset-paginated; a malformed cursor is {@code 400 INVALID_CURSOR} and the client restarts
-     * from the first page (§4.5).
+     * {@code GET /clients/{clientId}/interactions} (IL-US-01, IL-US-03) — the timeline, newest
+     * first. Keyset-paginated; a malformed cursor is {@code 400 INVALID_CURSOR} and the client
+     * restarts from the first page (§4.5).
+     *
+     * <p>{@code type} repeats ({@code ?type=CALL&type=MEETING}); {@code from} is inclusive and
+     * {@code to} exclusive; {@code q} searches subjects only, because bodies are encrypted (§4.7).
      */
     @GetMapping("/clients/{clientId}/interactions")
     public KeysetPage<TimelineEntry> timeline(
             @PathVariable UUID clientId,
-            @RequestParam(required = false) InteractionType type,
+            @RequestParam(required = false) List<InteractionType> type,
+            @RequestParam(required = false) Instant from,
+            @RequestParam(required = false) Instant to,
+            @RequestParam(required = false) UUID authorId,
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false, defaultValue = "false") boolean includeDeleted,
             @RequestParam(required = false) String cursor,
             @RequestParam(required = false) Integer limit,
             CurrentUser caller) {
-        return interactions.timeline(clientId, type, cursor, limit, caller);
+        TimelineFilter filter = new TimelineFilter(type, from, to, authorId, q, includeDeleted);
+        return interactions.timeline(clientId, filter, cursor, limit, caller);
+    }
+
+    /**
+     * {@code DELETE /interactions/{id}} — soft delete (§6.3). Destructive, so it takes the version
+     * the caller last saw; the reason is required because an auditor will ask for it.
+     */
+    @DeleteMapping("/interactions/{id}")
+    public ResponseEntity<Void> delete(
+            @PathVariable UUID id,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
+            @RequestParam(required = false) String reason,
+            CurrentUser caller) {
+        interactions.delete(id, ETags.requireIfMatch(ifMatch), reason, caller);
+        return ResponseEntity.noContent().build();
     }
 
     /** {@code GET /interactions/{id}} — the full body, which is a disclosure (IL-BR-11). */
