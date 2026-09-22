@@ -87,6 +87,15 @@ public class ClientConstraintErrors implements ConstraintError.Registry {
                         ConstraintError.businessRule("A product cannot be opened in the future.")),
                 Map.entry(
                         "ck_products_currency",
-                        ConstraintError.businessRule("Currency must be a three-letter ISO code.")));
+                        ConstraintError.businessRule("Currency must be a three-letter ISO code.")),
+                Map.entry(
+                        "ck_products_close_order",
+                        ConstraintError.businessRule("A product cannot close before it was opened.")),
+                Map.entry(
+                        "ck_products_closed_has_date",
+                        ConstraintError.businessRule("A closed product needs a closing date.")),
+                Map.entry(
+                        "ck_products_open_has_no_close",
+                        ConstraintError.businessRule("Only a closed product may carry a closing date.")));
     }
 }

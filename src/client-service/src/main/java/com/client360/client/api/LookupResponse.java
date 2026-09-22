@@ -1,12 +1,7 @@
 package com.client360.client.api;
 
-import com.client360.client.api.ClientResponse.UserSummary;
-import com.client360.client.domain.ClientSegment;
-import com.client360.client.domain.KycStatus;
 import com.fasterxml.jackson.annotation.JsonInclude;
-import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * {@code GET /clients/lookup} (SPEC.md §5.3, CP-US-01) — the single box that has to turn an email,
@@ -22,7 +17,7 @@ import java.util.UUID;
  * client exists and belongs to Adam Nowak" and raise a break-glass request (RB-US-05).
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
-public record LookupResponse(MatchType matchType, boolean exact, List<Match> results) {
+public record LookupResponse(MatchType matchType, boolean exact, List<ClientSummaryResponse> results) {
 
     /** How the server read the query. {@code q} is auto-detected; an explicit parameter is not. */
     public enum MatchType {
@@ -31,18 +26,6 @@ public record LookupResponse(MatchType matchType, boolean exact, List<Match> res
         EXTERNAL_REF,
         NAME
     }
-
-    public record Match(
-            UUID id,
-            String displayName,
-            String externalRef,
-            ClientSegment segment,
-            KycStatus kycStatus,
-            String maskedEmail,
-            String maskedPhone,
-            UserSummary owner,
-            boolean inScope,
-            Instant lastInteractionAt) {}
 
     /** Empty is {@code 200} with no results, never {@code 404} (§5.3). */
     public static LookupResponse empty(MatchType matchType) {

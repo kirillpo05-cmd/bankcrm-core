@@ -12,6 +12,7 @@ import com.client360.client.api.ClientResponse.Permissions;
 import com.client360.client.api.ClientResponse.Stats;
 import com.client360.client.api.ClientResponse.UserSummary;
 import com.client360.client.domain.Client;
+import com.client360.client.persistence.ClientProductRepository;
 import com.client360.client.persistence.UserRepository;
 import com.client360.client.support.Masks;
 import com.client360.common.security.AccessPolicy;
@@ -26,11 +27,14 @@ import org.springframework.stereotype.Component;
 public class ClientAssembler {
 
     private final UserRepository users;
+    private final ClientProductRepository products;
     private final Masks masks;
     private final AccessPolicy accessPolicy;
 
-    public ClientAssembler(UserRepository users, Masks masks, AccessPolicy accessPolicy) {
+    public ClientAssembler(
+            UserRepository users, ClientProductRepository products, Masks masks, AccessPolicy accessPolicy) {
         this.users = users;
+        this.products = products;
         this.masks = masks;
         this.accessPolicy = accessPolicy;
     }
@@ -62,9 +66,13 @@ public class ClientAssembler {
                         client.kycVerifiedAt(),
                         client.kycExpiresAt(),
                         daysUntil(now, client.kycExpiresAt()),
-                        client.kycRejectionReason()),
+                        client.kycRejectionReason(),
+                        client.kycNote()),
                 owner(client.ownerManagerId()),
                 client.teamId(),
+                products.findByClient(client.id(), null, null).stream()
+                        .map(product -> ProductResponse.of(product, now))
+                        .toList(),
                 new Stats(client.lastInteractionAt(), client.openTaskCount()),
                 permissions(client, caller),
                 client.version(),
@@ -72,9 +80,9 @@ public class ClientAssembler {
                 client.updatedAt());
     }
 
-    /** A search hit: identity enough to disambiguate, contacts masked (CP-BR-13). */
-    public LookupResponse.Match toMatch(Client client, boolean inScope) {
-        return new LookupResponse.Match(
+    /** A list row: identity enough to disambiguate, contacts masked (CP-BR-13). */
+    public ClientSummaryResponse toSummary(Client client, boolean inScope) {
+        return new ClientSummaryResponse(
                 client.id(),
                 client.displayName(),
                 client.externalRef(),

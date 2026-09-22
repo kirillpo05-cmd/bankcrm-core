@@ -1,0 +1,68 @@
+# interaction-service. Values come from the environment in every deployment; the
+# defaults here are the local compose stack (docker-compose.yml, .env.example).
+spring:
+  application:
+    name: interaction-service
+  datasource:
+    # `public` must stay on the search path alongside `interaction`: pg_trgm's
+    # similarity() and the % operator are resolved at query time, and db/init puts
+    # the extensions in public.
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/client360?currentSchema=interaction,public}
+    username: ${SPRING_DATASOURCE_USERNAME:client360}
+    password: ${SPRING_DATASOURCE_PASSWORD:client360_local_only}
+    hikari:
+      pool-name: interaction-service
+      maximum-pool-size: 20
+  flyway:
+    locations: classpath:db/migration
+    schemas: interaction
+    default-schema: interaction
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+
+server:
+  port: 8080
+  error:
+    whitelabel:
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+client360:
+  crypto:
+    data-key: ${CLIENT360_CRYPTO_DEV_KEY:}
+    pepper: ${CLIENT360_CRYPTO_DEV_PEPPER:}
+    key-version: 1
+  security:
+    jwt:
+      public-key: ${CLIENT360_JWT_PUBLIC_KEY:}
+      public-key-location: ${CLIENT360_JWT_PUBLIC_KEY_LOCATION:}
+      issuer: ${CLIENT360_JWT_ISSUER:}
+  # The authorization authority (§3.1). Inside compose the service name resolves;
+  # from the host it is localhost:8080.
+  client-service:
+    base-url: ${CLIENT360_CLIENT_SERVICE_URL:http://localhost:8080}
+    timeout: 2s
+
+logging:
+  level:
+    root: INFO
+    com.client360: INFO

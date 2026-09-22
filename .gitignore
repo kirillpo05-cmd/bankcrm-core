@@ -39,3 +39,5 @@ desktop.ini
 *.log
 logs/
 tmp/
+
+.claude/worktrees/

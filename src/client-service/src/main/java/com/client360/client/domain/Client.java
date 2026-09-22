@@ -30,6 +30,7 @@ public record Client(
         Instant kycVerifiedAt,
         Instant kycExpiresAt,
         String kycRejectionReason,
+        String kycNote,
         UUID ownerManagerId,
         UUID teamId,
         Instant lastInteractionAt,
@@ -45,6 +46,99 @@ public record Client(
 
     public String displayName() {
         return firstName + " " + lastName;
+    }
+
+    /**
+     * The same client with its editable profile replaced. Identity, ownership, KYC and bookkeeping
+     * columns are carried over untouched — they change through their own paths, never as a side
+     * effect of a profile edit (CP-BR-01, CP-BR-03, CP-BR-04).
+     */
+    public Client withProfile(
+            String firstName,
+            String lastName,
+            String middleName,
+            LocalDate dateOfBirth,
+            String email,
+            String phone,
+            String taxId,
+            String address,
+            ContactChannel preferredChannel,
+            ClientSegment segment,
+            ClientStatus status,
+            RiskRating risk) {
+        return new Client(
+                id,
+                externalRef,
+                firstName,
+                lastName,
+                middleName,
+                dateOfBirth,
+                email,
+                phone,
+                taxId,
+                address,
+                preferredChannel,
+                segment,
+                status,
+                risk,
+                kycStatus,
+                kycVerifiedAt,
+                kycExpiresAt,
+                kycRejectionReason,
+                kycNote,
+                ownerManagerId,
+                teamId,
+                lastInteractionAt,
+                openTaskCount,
+                mergedIntoId,
+                mergedAt,
+                version,
+                createdAt,
+                createdBy,
+                updatedAt,
+                updatedBy,
+                deletedAt);
+    }
+
+    /** The same client with a new KYC decision; everything else carried over (CP-BR-04). */
+    public Client withKyc(
+            KycStatus kycStatus,
+            Instant kycVerifiedAt,
+            Instant kycExpiresAt,
+            String kycRejectionReason,
+            String kycNote) {
+        return new Client(
+                id,
+                externalRef,
+                firstName,
+                lastName,
+                middleName,
+                dateOfBirth,
+                email,
+                phone,
+                taxId,
+                address,
+                preferredChannel,
+                segment,
+                status,
+                risk,
+                kycStatus,
+                kycVerifiedAt,
+                kycExpiresAt,
+                kycRejectionReason,
+                kycNote,
+                ownerManagerId,
+                teamId,
+                lastInteractionAt,
+                openTaskCount,
+                mergedIntoId,
+                mergedAt,
+                version,
+                createdAt,
+                createdBy,
+                updatedAt,
+                updatedBy,
+                deletedAt);
     }
 
     public boolean isMerged() {

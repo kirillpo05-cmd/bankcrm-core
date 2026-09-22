@@ -460,6 +460,7 @@ CREATE TABLE clients (
     kyc_verified_at      TIMESTAMPTZ,
     kyc_expires_at       TIMESTAMPTZ,
     kyc_rejection_reason TEXT,
+    kyc_note_enc         BYTEA,          -- AES-256-GCM; evidence note of the latest decision (§5.3 kyc)
     -- ownership
     owner_manager_id     UUID           NOT NULL,
     team_id              UUID           NOT NULL,
@@ -771,30 +772,65 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 | Status | Code | Cause |
 |---|---|---|
 | `400` | `VALIDATION_FAILED` | Unknown field, `null` on a non-nullable field, bad format |
-| `403` | `PERMISSION_DENIED` | Manager attempting to change `ownerManagerId`, `teamId`, `risk` or `kycStatus` |
+| `403` | `PERMISSION_DENIED` | Changing `ownerManagerId`, `teamId` or `kycStatus` (any caller); `risk` without `client:kyc`; `status` without `client:delete` |
 | `404` | `CLIENT_NOT_FOUND` | Out of scope |
 | `409` | `VERSION_CONFLICT` | `If-Match` stale; `details[0].current` holds server state |
 | `409` | `CLIENT_DUPLICATE_EMAIL` | New email belongs to another client |
+| `409` | `CLIENT_DUPLICATE_TAX_ID` | New tax ID belongs to another client |
 | `412` | `PRECONDITION_REQUIRED` | `If-Match` missing |
-| `422` | `BUSINESS_RULE_VIOLATED` | Editing a `CLOSED` client (CP-BR-08) |
+| `422` | `BUSINESS_RULE_VIOLATED` | Editing a `CLOSED` client (CP-BR-08); changing `externalRef` (CP-BR-01) |
+
+**Field-level rules.** `client:write` in scope covers the profile and contact fields —
+`firstName`, `lastName`, `middleName`, `dateOfBirth`, `email`, `phone`, `taxId`, `address`,
+`preferredChannel`, `segment`. Every other field has an owner that `PATCH` must not bypass:
+
+| Field | Through `PATCH` | Why |
+|---|---|---|
+| `externalRef` | `422`, any caller | Immutable after creation (CP-BR-01) |
+| `teamId` | `403`, any caller | Derived from the owner, never set independently (CP-BR-03) |
+| `ownerManagerId` | `403`, any caller | Belongs to `POST /clients/{id}/reassign`, which requires a reason and moves open tasks (CP-US-05) |
+| `kycStatus` | `403`, any caller | Belongs to `POST /clients/{id}/kyc` and the CP-BR-04 state machine |
+| `risk` | also requires `client:kyc` in scope | A risk rating is a compliance assessment and follows the separation of duties in CP-BR-05 (A-13) |
+| `status` | also requires `client:delete` | Client lifecycle is admin authority; CP-BR-08 already names reopening admin-only (A-13) |
+
+A `CLOSED` client accepts nothing but `{"status": "ACTIVE"}` (CP-BR-08). An explicit `null`
+clears a nullable field (`middleName`, `email`, `taxId`, `address`) and is `400` on any other.
+A patch that changes nothing returns `200` with the current representation, no version bump
+and no event — CP-BR-12's "one event per write" counts writes, not requests. The `409
+VERSION_CONFLICT` body carries decrypted PII in `details[0].current`, so it emits
+`READ_SENSITIVE` exactly as a card read does (CP-BR-13).
 
 ---
 
 #### `POST /clients/{id}/kyc` — KYC transition
 
-**Permission:** `client:kyc` (supervisor, admin, compliance)
+**Permission:** depends on the target (CP-BR-05) — `client:write` in scope to move to `PENDING`;
+`client:kyc` in scope (supervisor, admin, compliance) to set `VERIFIED` or `REJECTED`. `EXPIRED`
+is never a caller's to set: the nightly sweep owns that edge (CP-BR-06).
 
 ```json
 { "targetStatus": "VERIFIED", "verifiedOn": "2026-09-09", "validityMonths": 24, "note": "Passport + utility bill on file" }
 ```
 
-**`200 OK`** — client representation with the new `kyc` block.
+| Field | Rule |
+|---|---|
+| `targetStatus` | Required |
+| `verifiedOn`, `validityMonths` | Required for `VERIFIED`; `kyc_verified_at` is `verifiedOn` at 00:00 UTC and `kyc_expires_at` is that plus `validityMonths` |
+| `reason` | Required for `REJECTED`, stored in `kyc_rejection_reason` |
+| `note` | Optional, ≤ 2000 characters. Stored encrypted in `kyc_note_enc` — free text about identity documents will eventually hold a document number — and returned as `kyc.note` |
+
+Leaving `VERIFIED` clears `kyc_verified_at` and `kyc_expires_at`, so a `PENDING` client never
+shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
+
+**`200 OK`** — client representation; the `kyc` block also carries `rejectionReason` and `note`.
 
 | Status | Code | Cause |
 |---|---|---|
-| `403` | `ROLE_REQUIRED` | Caller is a manager — managers cannot self-approve KYC (CP-BR-05) |
-| `409` | `ILLEGAL_STATE_TRANSITION` | e.g. `NOT_STARTED → VERIFIED` without passing `PENDING` |
-| `422` | `BUSINESS_RULE_VIOLATED` | `targetStatus = REJECTED` with no `reason`; `validityMonths` outside 6–60 |
+| `403` | `ROLE_REQUIRED` | `VERIFIED` or `REJECTED` without `client:kyc` — a manager cannot approve KYC (CP-BR-05) |
+| `403` | `PERMISSION_DENIED` | The caller owns the client; `details[0].reason` is `SELF_APPROVAL_FORBIDDEN` (CP-BR-05) |
+| `404` | `CLIENT_NOT_FOUND` | Out of scope |
+| `409` | `ILLEGAL_STATE_TRANSITION` | A pair outside CP-BR-04, e.g. `NOT_STARTED → VERIFIED`; or `targetStatus = EXPIRED` |
+| `422` | `BUSINESS_RULE_VIOLATED` | `REJECTED` with no `reason`; `VERIFIED` without `verifiedOn` or `validityMonths`; `validityMonths` outside 6–60; `verifiedOn` in the future; a verification whose expiry has already passed |
 
 ---
 
@@ -812,7 +848,14 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 |---|---|---|
 | `403` | `SCOPE_VIOLATION` | Supervisor targeting a manager outside their team |
 | `404` | `USER_NOT_FOUND` | `newOwnerManagerId` unknown or deactivated |
-| `422` | `BUSINESS_RULE_VIOLATED` | New owner equals current owner; new owner lacks the `MANAGER` role; `reason` under 10 characters |
+| `422` | `BUSINESS_RULE_VIOLATED` | New owner equals current owner; new owner has no primary team, so CP-BR-03 has nothing to derive from; new owner lacks the `MANAGER` role; `reason` under 10 characters |
+
+Two parts of this endpoint wait on tables that do not exist yet, and both fail open rather than
+pretending: the **`MANAGER` role check** needs `user_roles`, which ships with RBAC in v2, so today
+any active user with a primary team may receive a client; and **`transferOpenTasks`** is accepted
+and answered with `"tasksTransferred": 0`, because tasks live in interaction-service and nothing
+can have followed the client. The count is reported rather than omitted so the response shape does
+not change when it starts being true.
 
 ---
 
@@ -853,7 +896,11 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 | Status | Code | Cause |
 |---|---|---|
 | `403` | `ROLE_REQUIRED` | Not an admin |
-| `422` | `BUSINESS_RULE_VIOLATED` | Client holds an `ACTIVE` product, or has open tasks (CP-BR-09) |
+| `422` | `BUSINESS_RULE_VIOLATED` | Client holds an `ACTIVE` product, or has open tasks (CP-BR-09); `reason` under 10 characters |
+
+Only the product half of CP-BR-09 is enforced today: open tasks live in interaction-service, which
+has no code yet, so there is nothing to ask. The check belongs on this side of the call and is
+added when the service exists.
 
 ---
 
@@ -861,10 +908,34 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| `GET` | `/clients/{id}/products` | `client:read` | `?status=ACTIVE&type=MORTGAGE`; `200` with `[]` when none |
-| `POST` | `/clients/{id}/products` | `product:write` (admin / sync service account) | `201`; `409 PRODUCT_DUPLICATE_EXTERNAL_ID` |
-| `PATCH` | `/clients/{id}/products/{productId}` | `product:write` | `409 VERSION_CONFLICT`, `422` on closing a product with a non-zero balance |
+| `GET` | `/clients/{id}/products` | `client:read` | `?status=ACTIVE&type=MORTGAGE`; `200` with `[]` when none. Emits no `READ_SENSITIVE`: nothing here is decrypted PII, and CP-BR-13 ties the event to a genuine disclosure rather than to every panel that renders |
+| `POST` | `/clients/{id}/products` | `product:write` (admin / sync service account) | `Idempotency-Key` required; `201`; `409 PRODUCT_DUPLICATE_EXTERNAL_ID`; `422` when the client is not cleared for new products (CP-BR-07) |
+| `PATCH` | `/clients/{id}/products/{productId}` | `product:write` | `If-Match` required; `409 VERSION_CONFLICT` with `details[0].current`, `404 PRODUCT_NOT_FOUND`, `422` on closing a product with a non-zero balance |
 | `POST` | `/clients/{id}/products/sync` | `product:sync` | `202 Accepted`; pulls fresh state from core banking; `503 DEPENDENCY_UNAVAILABLE` when the core is down |
+
+---
+
+#### Internal endpoints — how other services ask
+
+`interaction-service` and `audit-service` own no client or user table (§3.1), so the two questions
+they cannot answer themselves are answered here. Both relay the **caller's own bearer token**, not
+a service credential: the decision is about the human making the request, so their identity has to
+survive the hop, and ER-01's `404` passes back through the calling service unchanged.
+
+| Method | Path | Answers |
+|---|---|---|
+| `GET` | `/internal/clients/{id}/access?permission=<code>` | `200` with `{clientId, ownerManagerId, teamId, status, kycStatus}` when the caller holds that permission over the client; `404` when absent or out of scope; `403` when the permission is held at no scope |
+| `GET` | `/internal/users?ids=<uuid>,<uuid>` | `200` with `[{id, fullName}]` — display names for authors and assignees, capped at 100 ids |
+
+Deliberately **not** `GET /clients/{id}`. Authorizing a write to an interaction does not need the
+client's name, email or phone; reusing the card would ship all three between services and write a
+`READ_SENSITIVE` row for a disclosure nobody read (CP-BR-13). What the access view does carry is
+exactly what a caller needs to apply the client's own rules — CP-BR-07 turns on `kycStatus` and
+`status`, CP-BR-08 on `status`.
+
+User names are corporate directory data, not client PII — the same reason `users.email` is a
+plaintext column (§9.2.3) — so any authenticated caller may resolve a name for an id they already
+hold. A directory dump is a different request with a different permission (`user:read`).
 
 ---
 
@@ -890,7 +961,7 @@ Returns the offset-paginated envelope of card summaries. `sort` accepts `lastNam
 | CP-BR-09 | Soft delete is refused while the client holds an `ACTIVE` product or an open task. Close or reassign first — this prevents orphaning live banking relationships. |
 | CP-BR-10 | **Merge semantics.** The survivor keeps its own `id` and `external_ref`. Interactions, tasks and non-conflicting products re-point via `UPDATE … SET client_id = survivor`. Conflicting products (same `external_product_id`) are skipped and reported in `skipped`. The loser is soft-deleted with `merged_into_id` set; every subsequent read of its ID returns `410` with a `Location` to the survivor. Merges are **not reversible** through the API — a reversal is a DBA runbook. |
 | CP-BR-11 | `last_interaction_at` and `open_task_count` are denormalized counters maintained by the `interaction.events` / `task.events` consumer inside `client-service`. They are display-only and may lag by seconds. **No business decision may read them** — anything authoritative queries `interaction-service` directly. A nightly reconciliation job repairs drift. |
-| CP-BR-12 | Every write emits exactly one event (`client.created`, `client.updated`, `client.deleted`, `client.merged`, `client.kyc_changed`, `client.reassigned`) through the outbox. `changedFields` masks sensitive values per AR-01. |
+| CP-BR-12 | Every write emits exactly one event through the outbox: `client.created`, `client.updated`, `client.deleted`, `client.merged`, `client.kyc_changed`, `client.reassigned`, and on the product projection `client.product_added` and `client.product_updated` (`entity.type = CLIENT_PRODUCT`, keyed by `client_id` like the rest). `changedFields` masks sensitive values per AR-01 — on a product that means `maskedNumber` and `balanceMinor`, because the envelope carries `clientId` beside them. A request that changes nothing writes nothing and emits nothing: the rule counts writes, not requests. |
 | CP-BR-13 | Reading a client card emits a `READ_SENSITIVE` audit event **only when decrypted PII is actually returned** — i.e. not for masked search results. This keeps the audit table from being flooded by list views while still recording every genuine PII disclosure. |
 | CP-BR-14 | Minimum age 18 is enforced by DB constraint and validated at the API edge for a better message. Corporate clients (`segment = 'SME'`) use the registration date as `date_of_birth`; the constraint holds. |
 
@@ -1213,6 +1284,10 @@ CREATE INDEX ix_att_interaction ON interaction_attachments (interaction_id) WHER
 | Status | Code | Cause |
 |---|---|---|
 | `400` | `VALIDATION_FAILED` | `subject` empty or > 200 chars; `body` > 10 000 chars; `durationSeconds` on a `NOTE` |
+
+`body` is optional and stored as an empty string when absent — a subject-only note ("left a
+voicemail") is legitimate; `body_enc` is `NOT NULL` because the column must hold ciphertext, not
+because every note has text.
 | `403` | `PERMISSION_DENIED` | Client not in scope for writing |
 | `404` | `CLIENT_NOT_FOUND` | Unknown or out-of-scope client |
 | `409` | `IDEMPOTENCY_KEY_REUSED` | Same key, different payload |
@@ -1269,6 +1344,14 @@ CREATE INDEX ix_att_interaction ON interaction_attachments (interaction_id) WHER
 
 Empty timeline → `200` with `"content": []`.
 
+Filter semantics: `type` repeats and is OR'd; `from` is inclusive and `to` exclusive, so
+consecutive windows neither overlap nor leave a gap; `q` is a case-insensitive **substring** of the
+subject with the caller's `%`, `_` and `\` escaped — a percent sign typed into the search box is a
+percent sign, not a wildcard. "The auditor/admin role" is asked as `audit:read` at `ALL` scope, which
+auditors, admins and compliance hold and supervisors (at `TEAM`) do not (RB-BR-01). With
+`includeDeleted`, a removed row carries `deleted: true`, `deletedAt`, `deletedBy` and
+`deletionReason` so it can be shown struck through and labelled.
+
 ---
 
 #### `GET /interactions/{id}` — full detail
@@ -1276,6 +1359,12 @@ Empty timeline → `200` with `"content": []`.
 **Permission:** `interaction:read` in scope; `PRIVATE` rows require authorship or the admin role
 
 **`200 OK`** — the create-response shape plus full `body`, `attachments[]`, and `corrections[]`.
+
+On someone else's `PRIVATE` note an admin receives the metadata with `"body": null` — they may
+know the note exists, never what it says (IL-BR-09, §12 Q-07). That view is still audited as
+`READ_SENSITIVE` with `context.disclosure = interaction.private_metadata`: who looked at private
+notes is exactly the question the trail exists to answer. The timeline applies the same rule —
+the row appears for an admin with `bodyPreview: null`.
 
 | Status | Code | Cause |
 |---|---|---|
@@ -1300,6 +1389,13 @@ Empty timeline → `200` with `"content": []`.
 | `422` | `INTERACTION_EDIT_WINDOW_CLOSED` | Past 15 min — response carries `details[0].correctionEndpoint` pointing at the correction route |
 | `422` | `BUSINESS_RULE_VIOLATED` | Attempt to change `type`, `clientId` or `occurredAt` — all immutable |
 
+IL-BR-01 makes **everything but the wording** immutable, so `authorId`, `direction`,
+`durationSeconds`, `outcome`, `visibility`, `source` and `correctsId` are refused with the same
+`422` — changing an outcome after the fact rewrites what happened as surely as changing the type.
+Any other field is `400`. Checks run existence and scope → authorship → substance → window →
+version: a closed window outranks a stale `If-Match`, because no retry can open it. An edit that
+changes nothing returns `200` without counting against the IL-BR-04 cap or emitting an event.
+
 ---
 
 #### `POST /interactions/{id}/corrections` — append-only amendment
@@ -1311,6 +1407,20 @@ Empty timeline → `200` with `"content": []`.
 ```
 
 Creates a **new** interaction with `corrects_id` set. The original is never mutated. `201 Created`.
+Requires `Idempotency-Key` like every create: a correction sent twice on a flaky connection must
+not appear twice under the original.
+
+What a correction takes from the original, and what it does not:
+
+| Field | Value | Why |
+|---|---|---|
+| `occurredAt` | the original's | Same moment described; the keyset timeline orders by it, so this is what places the pair side by side (IL-BR-03) |
+| `visibility` | the original's | Correcting a private note must not publish the correction |
+| `type`, `direction` | `NOTE`, `INTERNAL` | A correction of a call is not a second call — inheriting the type would count it twice in every report, and CP-BR-08 would refuse to let anyone fix a closed client's record |
+| `durationSeconds`, `outcome` | none, `NOT_APPLICABLE` | Same reason |
+
+A caller who can see a `PRIVATE` note but not read it — an admin — cannot correct it (`403`):
+amending what you may not read is writing blind.
 
 | Status | Code | Cause |
 |---|---|---|
@@ -1329,7 +1439,14 @@ Creates a **new** interaction with `corrects_id` set. The original is never muta
 | Status | Code | Cause |
 |---|---|---|
 | `403` | `ROLE_REQUIRED` | Managers cannot delete interactions at all — that is the whole point of an audit trail |
-| `422` | `BUSINESS_RULE_VIOLATED` | The interaction has a linked open task; close or unlink first |
+| `404` | `INTERACTION_NOT_FOUND` | Absent, already deleted, out of scope, or someone else's private note a supervisor cannot see |
+| `409` | `VERSION_CONFLICT` | Stale `If-Match`; `details[0].current` omits the body where the caller may not read it (IL-BR-09) |
+| `422` | `BUSINESS_RULE_VIOLATED` | The interaction has a linked open task; close or unlink first; `reason` under 10 characters |
+
+`ROLE_REQUIRED` is answered before the interaction is looked up: it depends on the caller alone, so
+an unknown id and a known one get the same reply. The linked-open-task check waits on §7 — tasks
+live in this service but have no code yet, so there is nothing to ask; it lands with them. The
+reason travels in the `interaction.deleted` event's `context`.
 
 ---
 
@@ -3157,6 +3274,7 @@ Likewise, the outbox and event envelope ship in the **MVP** even though `audit-s
 | A-10 | Every task belongs to a client. | TR-BR-01. Makes task RBAC derive from client scope with no second mechanism. |
 | A-11 | Minimum client age 18. | Retail banking default. SME clients use the registration date. |
 | A-12 | Currency stored as minor units in `BIGINT`. | No float arithmetic on money, ever. |
+| A-13 | Through `PATCH`, `risk` additionally requires `client:kyc` and `status` requires `client:delete`. | §5.3 named only the manager's `403`, not who may change these. A risk rating is a compliance judgement, so it follows CP-BR-05's separation of duties; client lifecycle is admin authority, and CP-BR-08 already makes reopening admin-only. Mapping to permissions rather than roles keeps rule RB-BR-01. |
 
 ### 12.2 Open questions for the product owner
 

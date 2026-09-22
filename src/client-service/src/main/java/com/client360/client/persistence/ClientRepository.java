@@ -43,6 +43,7 @@ public class ClientRepository {
     static final String AAD_PHONE = "client.clients.phone";
     static final String AAD_TAX_ID = "client.clients.tax_id";
     static final String AAD_ADDRESS = "client.clients.address";
+    static final String AAD_KYC_NOTE = "client.clients.kyc_note";
 
     private static final String COLUMNS = """
             id, external_ref, first_name, last_name, middle_name, date_of_birth,
@@ -52,7 +53,7 @@ public class ClientRepository {
             status::text            AS status,
             risk::text              AS risk,
             kyc_status::text        AS kyc_status,
-            kyc_verified_at, kyc_expires_at, kyc_rejection_reason,
+            kyc_verified_at, kyc_expires_at, kyc_rejection_reason, kyc_note_enc,
             owner_manager_id, team_id, last_interaction_at, open_task_count,
             merged_into_id, merged_at, version,
             created_at, created_by, updated_at, updated_by, deleted_at
@@ -118,7 +119,142 @@ public class ClientRepository {
                 .single();
     }
 
+    /**
+     * Writes the whole mutable state of {@code next} if the row is still at {@code expectedVersion},
+     * and returns the stored row. Empty means someone else wrote first — or the row was deleted —
+     * and the caller answers {@code 409 VERSION_CONFLICT} (§4.8).
+     *
+     * <p>One statement for every mutation rather than one per field set: there is no SQL built
+     * from what the caller sent, and every ciphertext column is rewritten under the current key,
+     * so a row can never end up holding columns encrypted under two different
+     * {@code key_version}s.
+     *
+     * <p>{@code external_ref}, {@code owner_manager_id} and {@code team_id} are absent on purpose.
+     * The first is immutable (CP-BR-01); the other two change only through reassignment, which
+     * re-derives the team in the same transaction (CP-BR-03).
+     */
+    public Optional<Client> update(Client next, int expectedVersion, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            first_name           = :firstName,
+                            last_name            = :lastName,
+                            middle_name          = :middleName,
+                            date_of_birth        = :dateOfBirth,
+                            email_enc            = :emailEnc,
+                            email_hash           = :emailHash,
+                            phone_enc            = :phoneEnc,
+                            phone_hash           = :phoneHash,
+                            tax_id_enc           = :taxIdEnc,
+                            tax_id_hash          = :taxIdHash,
+                            address_enc          = :addressEnc,
+                            kyc_note_enc         = :kycNoteEnc,
+                            key_version          = :keyVersion,
+                            preferred_channel    = CAST(:preferredChannel AS contact_channel),
+                            segment              = CAST(:segment AS client_segment),
+                            status               = CAST(:status AS client_status),
+                            risk                 = CAST(:risk AS risk_rating),
+                            kyc_status           = CAST(:kycStatus AS kyc_status),
+                            kyc_verified_at      = :kycVerifiedAt,
+                            kyc_expires_at       = :kycExpiresAt,
+                            kyc_rejection_reason = :kycRejectionReason,
+                            version              = version + 1,
+                            updated_at           = now(),
+                            updated_by           = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", next.id())
+                .param("expectedVersion", expectedVersion)
+                .param("firstName", next.firstName())
+                .param("lastName", next.lastName())
+                .param("middleName", next.middleName())
+                .param("dateOfBirth", next.dateOfBirth())
+                .param("emailEnc", cipher.encrypt(next.email(), AAD_EMAIL))
+                .param("emailHash", hasher.hash(next.email()))
+                .param("phoneEnc", cipher.encrypt(next.phone(), AAD_PHONE))
+                .param("phoneHash", hasher.hash(next.phone()))
+                .param("taxIdEnc", cipher.encrypt(next.taxId(), AAD_TAX_ID))
+                .param("taxIdHash", hasher.hash(next.taxId()))
+                .param("addressEnc", cipher.encrypt(next.address(), AAD_ADDRESS))
+                .param("kycNoteEnc", cipher.encrypt(next.kycNote(), AAD_KYC_NOTE))
+                .param("keyVersion", cipher.currentKeyVersion())
+                .param("preferredChannel", next.preferredChannel().name())
+                .param("segment", next.segment().name())
+                .param("status", next.status().name())
+                .param("risk", next.risk().name())
+                .param("kycStatus", next.kycStatus().name())
+                .param("kycVerifiedAt", timestamp(next.kycVerifiedAt()))
+                .param("kycExpiresAt", timestamp(next.kycExpiresAt()))
+                .param("kycRejectionReason", next.kycRejectionReason())
+                .param("actor", actorId)
+                .query(this::map)
+                .optional();
+    }
+
+    /**
+     * CP-US-05. Ownership moves through its own statement rather than through {@link #update},
+     * which deliberately cannot touch these columns: a reassignment carries a reason, re-derives
+     * the team from the new owner in the same transaction (CP-BR-03), and must never happen as a
+     * side effect of a contact-details edit.
+     */
+    public Optional<Client> reassign(UUID id, UUID newOwnerId, UUID newTeamId, int expectedVersion, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            owner_manager_id = :ownerId,
+                            team_id          = :teamId,
+                            version          = version + 1,
+                            updated_at       = now(),
+                            updated_by       = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("ownerId", newOwnerId)
+                .param("teamId", newTeamId)
+                .param("expectedVersion", expectedVersion)
+                .param("actor", actorId)
+                .query(this::map)
+                .optional();
+    }
+
+    /**
+     * §4.9 soft delete. The row stays: audit rows reference {@code client_id} and must remain
+     * resolvable for seven years, and an erasure overwrites the sensitive columns rather than
+     * dropping the record (CP-EC-12). Every read path filters on {@code deleted_at IS NULL}, so
+     * from the API's point of view the client is gone.
+     */
+    public Optional<Client> softDelete(UUID id, int expectedVersion, UUID actorId, String reason) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            deleted_at      = now(),
+                            deleted_by      = :actor,
+                            deletion_reason = :reason,
+                            version         = version + 1,
+                            updated_at      = now(),
+                            updated_by      = :actor
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("expectedVersion", expectedVersion)
+                .param("actor", actorId)
+                .param("reason", reason)
+                .query(this::map)
+                .optional();
+    }
+
     // -------------------------------------------------------------------- reads
+
+    /**
+     * The live row, locked until the transaction ends. For state-machine transitions (CP-BR-04):
+     * two approvers acting at once must not both see {@code PENDING} and both write.
+     */
+    public Optional<Client> findByIdForUpdate(UUID id) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM clients WHERE id = :id AND deleted_at IS NULL FOR UPDATE")
+                .param("id", id)
+                .query(this::map)
+                .optional();
+    }
 
     /** The card read: soft-deleted rows are invisible, which is what makes ER-01's 404 truthful. */
     public Optional<Client> findById(UUID id) {
@@ -199,6 +335,34 @@ public class ClientRepository {
     }
 
     /**
+     * {@code GET /clients} (§5.3). Scope is applied in the {@code WHERE} clause, not by filtering
+     * rows afterwards: a page of 25 must be 25 clients the caller may see, and a row the caller
+     * has no right to has no business leaving the database (RB-BR-02).
+     *
+     * <p>Ordering comes from {@link SortField}, so no caller-supplied string is ever concatenated
+     * into the statement; {@code id} breaks ties, or a page boundary would drift between requests.
+     */
+    public List<Client> search(ClientSearch criteria, SortField sort, boolean ascending, int limit, int offset) {
+        String direction = ascending ? "ASC" : "DESC";
+        return bind(
+                        jdbc.sql("SELECT " + COLUMNS + " FROM clients " + WHERE
+                                + " ORDER BY " + sort.column() + " " + direction + " NULLS LAST, id ASC"
+                                + " LIMIT :limit OFFSET :offset"),
+                        criteria)
+                .param("limit", limit)
+                .param("offset", offset)
+                .query(this::map)
+                .list();
+    }
+
+    public long countSearch(ClientSearch criteria) {
+        Long count = bind(jdbc.sql("SELECT count(*) FROM clients " + WHERE), criteria)
+                .query(Long.class)
+                .single();
+        return count == null ? 0 : count;
+    }
+
+    /**
      * Follows {@code merged_into_id} to the end of the chain (CP-EC-09). Returns empty when the
      * chain exceeds {@link #MAX_MERGE_HOPS}, which can only mean a cycle — the caller turns that
      * into a 500 with an alert rather than looping.
@@ -242,6 +406,7 @@ public class ClientRepository {
                 instant(rs, "kyc_verified_at"),
                 instant(rs, "kyc_expires_at"),
                 rs.getString("kyc_rejection_reason"),
+                cipher.decrypt(rs.getBytes("kyc_note_enc"), keyVersion, AAD_KYC_NOTE),
                 rs.getObject("owner_manager_id", UUID.class),
                 rs.getObject("team_id", UUID.class),
                 instant(rs, "last_interaction_at"),
@@ -256,10 +421,106 @@ public class ClientRepository {
                 instant(rs, "deleted_at"));
     }
 
+    /** Bound as {@code TIMESTAMPTZ}; a bare {@link Instant} has no JDBC type of its own. */
+    private static OffsetDateTime timestamp(Instant value) {
+        return value == null ? null : value.atOffset(java.time.ZoneOffset.UTC);
+    }
+
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         OffsetDateTime value = rs.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
     }
+
+    /**
+     * Every filter of {@code GET /clients} in one clause. A null filter is expressed in SQL rather
+     * than by assembling a different statement: one plan, and nothing built from what was sent.
+     */
+    private static final String WHERE = """
+            WHERE deleted_at IS NULL
+              AND (CAST(:scopeOwnerId AS uuid) IS NULL OR owner_manager_id = CAST(:scopeOwnerId AS uuid))
+              AND (CAST(:scopeTeamId  AS uuid) IS NULL OR team_id          = CAST(:scopeTeamId  AS uuid))
+              AND (CAST(:ownerId      AS uuid) IS NULL OR owner_manager_id = CAST(:ownerId      AS uuid))
+              AND (CAST(:teamId       AS uuid) IS NULL OR team_id          = CAST(:teamId       AS uuid))
+              AND (CAST(:segment   AS text) IS NULL OR segment::text    = CAST(:segment   AS text))
+              AND (CAST(:status    AS text) IS NULL OR status::text     = CAST(:status    AS text))
+              AND (CAST(:kycStatus AS text) IS NULL OR kyc_status::text = CAST(:kycStatus AS text))
+              AND (CAST(:q AS text) IS NULL
+                   OR lower(first_name || ' ' || last_name) % lower(CAST(:q AS text)))
+              AND (CAST(:expiringDays AS int) IS NULL
+                   OR (kyc_status = 'VERIFIED'
+                       AND kyc_expires_at IS NOT NULL
+                       AND kyc_expires_at < now() + (CAST(:expiringDays AS int) * INTERVAL '1 day')))
+            """;
+
+    private static org.springframework.jdbc.core.simple.JdbcClient.StatementSpec bind(
+            org.springframework.jdbc.core.simple.JdbcClient.StatementSpec spec, ClientSearch criteria) {
+        return spec.param("scopeOwnerId", criteria.scopeOwnerId())
+                .param("scopeTeamId", criteria.scopeTeamId())
+                .param("ownerId", criteria.ownerId())
+                .param("teamId", criteria.teamId())
+                .param(
+                        "segment",
+                        criteria.segment() == null ? null : criteria.segment().name())
+                .param(
+                        "status",
+                        criteria.status() == null ? null : criteria.status().name())
+                .param(
+                        "kycStatus",
+                        criteria.kycStatus() == null
+                                ? null
+                                : criteria.kycStatus().name())
+                .param("q", criteria.q())
+                .param("expiringDays", criteria.kycExpiringWithinDays());
+    }
+
+    /**
+     * The columns {@code GET /clients} may be sorted by (§5.3). An enum rather than a string map
+     * so that the only values reaching {@code ORDER BY} are ones this class wrote.
+     */
+    public enum SortField {
+        LAST_NAME("lastName", "last_name"),
+        CREATED_AT("createdAt", "created_at"),
+        LAST_INTERACTION_AT("lastInteractionAt", "last_interaction_at"),
+        KYC_EXPIRES_AT("kycExpiresAt", "kyc_expires_at");
+
+        private final String apiName;
+        private final String column;
+
+        SortField(String apiName, String column) {
+            this.apiName = apiName;
+            this.column = column;
+        }
+
+        public String apiName() {
+            return apiName;
+        }
+
+        String column() {
+            return column;
+        }
+
+        public static Optional<SortField> byApiName(String name) {
+            return java.util.Arrays.stream(values())
+                    .filter(field -> field.apiName.equals(name))
+                    .findFirst();
+        }
+    }
+
+    /**
+     * The filters of {@code GET /clients}. {@code scopeOwnerId} and {@code scopeTeamId} are the
+     * caller's own visibility, kept apart from the {@code ownerId} and {@code teamId} a caller may
+     * ask for: narrowing a search must never be able to widen what is visible.
+     */
+    public record ClientSearch(
+            String q,
+            ClientSegment segment,
+            ClientStatus status,
+            KycStatus kycStatus,
+            UUID ownerId,
+            UUID teamId,
+            Integer kycExpiringWithinDays,
+            UUID scopeOwnerId,
+            UUID scopeTeamId) {}
 
     /**
      * A validated create, with identifiers already normalized. Normalization happens above this

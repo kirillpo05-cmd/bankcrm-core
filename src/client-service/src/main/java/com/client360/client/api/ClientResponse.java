@@ -8,6 +8,7 @@ import com.client360.client.domain.RiskRating;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -41,6 +42,7 @@ public record ClientResponse(
         Kyc kyc,
         UserSummary owner,
         UUID teamId,
+        List<ProductResponse> products,
         Stats stats,
         Permissions permissions,
         int version,
@@ -52,7 +54,12 @@ public record ClientResponse(
      *     negative once expiry has passed but the nightly sweep (CP-BR-06) has not yet run
      */
     public record Kyc(
-            KycStatus status, Instant verifiedAt, Instant expiresAt, Long daysUntilExpiry, String rejectionReason) {}
+            KycStatus status,
+            Instant verifiedAt,
+            Instant expiresAt,
+            Long daysUntilExpiry,
+            String rejectionReason,
+            String note) {}
 
     public record UserSummary(UUID id, String fullName) {}
 
