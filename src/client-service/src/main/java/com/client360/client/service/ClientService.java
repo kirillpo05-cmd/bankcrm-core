@@ -281,6 +281,10 @@ public class ClientService {
         if (!Permissions.ALL.contains(permission)) {
             throw ApiException.validation("permission", "must be a permission code from the §9.2.8 matrix");
         }
+        // Not holding the permission at any scope is 403, answered before the record is looked up:
+        // it depends on the caller alone, so it says nothing about which clients exist (ER-01).
+        // Only once the permission is held does "not this client" collapse into 404.
+        access.requireScope(caller, permission);
         Client client = requireLive(clients.findById(clientId), clientId);
         requireCovering(client, caller, permission);
         return new ClientAccessView(
