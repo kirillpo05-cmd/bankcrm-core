@@ -63,6 +63,48 @@ public class InteractionEvents {
     }
 
     /**
+     * IL-BR-02: the author reworded their own interaction inside the window. The event proves the
+     * wording changed and when, never what it said before or after (AR-01).
+     */
+    public void updated(Interaction before, Interaction after) {
+        ChangedFields changes = ChangedFields.create()
+                .sensitive("subject", before.subject(), after.subject())
+                .sensitive("body", before.body(), after.body())
+                .put("editCount", before.editCount(), after.editCount());
+        append(
+                after.clientId(),
+                events.event("interaction.updated", ENTITY, after.id())
+                        .clientId(after.clientId())
+                        .action("UPDATE")
+                        .changes(changes)
+                        .build());
+    }
+
+    /**
+     * IL-BR-03: an amendment appended after the window. Its own event type, not
+     * {@code interaction.created}, because "the record was corrected" is the question an
+     * investigation asks, and it should not have to reconstruct that from {@code correctsId}.
+     */
+    public void corrected(Interaction correction, Interaction original) {
+        ChangedFields changes = ChangedFields.create()
+                .put("type", null, correction.type())
+                .sensitive("subject", null, correction.subject())
+                .sensitive("body", null, correction.body())
+                .put("occurredAt", null, correction.occurredAt())
+                .put("visibility", null, correction.visibility())
+                .put("authorId", null, correction.authorId())
+                .put("correctsId", null, original.id());
+        append(
+                correction.clientId(),
+                events.event("interaction.corrected", ENTITY, correction.id())
+                        .clientId(correction.clientId())
+                        .action("CREATE")
+                        .changes(changes)
+                        .context("correctsId", original.id())
+                        .build());
+    }
+
+    /**
      * IL-BR-11: opening a full body is a disclosure and is audited; scrolling the timeline, which
      * returns a preview, is not.
      */

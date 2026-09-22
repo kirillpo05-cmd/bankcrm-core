@@ -99,7 +99,15 @@ public abstract class AbstractInteractionIntegrationTest {
     }
 
     protected String bearerFor(UUID userId) {
-        return TestJwt.bearerFor(userId, "test." + userId + "@bank.example", "Test User", List.of("MANAGER"));
+        return bearerFor(userId, "MANAGER");
+    }
+
+    /**
+     * The {@code roles} claim reaches authorization only through {@link Doubles#accessPolicy}, a
+     * test stand-in for the seam. Production never reads a role string (RB-BR-01).
+     */
+    protected String bearerFor(UUID userId, String role) {
+        return TestJwt.bearerFor(userId, "test." + userId + "@bank.example", "Test User", List.of(role));
     }
 
     protected int countEvents(String eventType) {
@@ -193,6 +201,20 @@ public abstract class AbstractInteractionIntegrationTest {
      */
     @TestConfiguration
     public static class Doubles {
+
+        /**
+         * {@code MvpAccessPolicy} makes everyone a MANAGER, which cannot express IL-BR-09 — the rule
+         * only means something when one caller is an admin and another is not. ADMIN holds every
+         * permission at ALL, as in the §9.2.8 matrix; everyone else is the MVP manager.
+         */
+        @Bean
+        @Primary
+        com.client360.common.security.AccessPolicy accessPolicy() {
+            com.client360.common.security.AccessPolicy manager = new com.client360.common.security.MvpAccessPolicy();
+            return (user, permission) -> user.roles().contains("ADMIN")
+                    ? java.util.Optional.of(com.client360.common.security.Scope.ALL)
+                    : manager.scopeOf(user, permission);
+        }
 
         @Bean
         @Primary

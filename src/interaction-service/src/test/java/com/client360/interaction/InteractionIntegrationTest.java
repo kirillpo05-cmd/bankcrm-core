@@ -53,6 +53,18 @@ class InteractionIntegrationTest extends AbstractInteractionIntegrationTest {
             assertThat(ChronoUnit.MINUTES.between(createdAt, editableUntil)).isEqualTo(15);
         }
 
+        /**
+         * A subject-only note is legitimate. body_enc is NOT NULL because the column must hold
+         * ciphertext, not because every note has something more to say.
+         */
+        @Test
+        void acceptsANoteWithNoBody() throws Exception {
+            String json = body("NOTE", "INTERNAL", "Left a voicemail", "x").replace("\"body\": \"x\",\n", "");
+            mvc.perform(create(json))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.body").value(""));
+        }
+
         @Test
         void rejectsADurationOnANote() throws Exception {
             String json = body("NOTE", "INTERNAL", "Note", "Body")

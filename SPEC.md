@@ -1284,6 +1284,10 @@ CREATE INDEX ix_att_interaction ON interaction_attachments (interaction_id) WHER
 | Status | Code | Cause |
 |---|---|---|
 | `400` | `VALIDATION_FAILED` | `subject` empty or > 200 chars; `body` > 10 000 chars; `durationSeconds` on a `NOTE` |
+
+`body` is optional and stored as an empty string when absent — a subject-only note ("left a
+voicemail") is legitimate; `body_enc` is `NOT NULL` because the column must hold ciphertext, not
+because every note has text.
 | `403` | `PERMISSION_DENIED` | Client not in scope for writing |
 | `404` | `CLIENT_NOT_FOUND` | Unknown or out-of-scope client |
 | `409` | `IDEMPOTENCY_KEY_REUSED` | Same key, different payload |
@@ -1348,6 +1352,12 @@ Empty timeline → `200` with `"content": []`.
 
 **`200 OK`** — the create-response shape plus full `body`, `attachments[]`, and `corrections[]`.
 
+On someone else's `PRIVATE` note an admin receives the metadata with `"body": null` — they may
+know the note exists, never what it says (IL-BR-09, §12 Q-07). That view is still audited as
+`READ_SENSITIVE` with `context.disclosure = interaction.private_metadata`: who looked at private
+notes is exactly the question the trail exists to answer. The timeline applies the same rule —
+the row appears for an admin with `bodyPreview: null`.
+
 | Status | Code | Cause |
 |---|---|---|
 | `404` | `INTERACTION_NOT_FOUND` | Absent, deleted, out of scope, or someone else's private note (rule ER-01) |
@@ -1371,6 +1381,13 @@ Empty timeline → `200` with `"content": []`.
 | `422` | `INTERACTION_EDIT_WINDOW_CLOSED` | Past 15 min — response carries `details[0].correctionEndpoint` pointing at the correction route |
 | `422` | `BUSINESS_RULE_VIOLATED` | Attempt to change `type`, `clientId` or `occurredAt` — all immutable |
 
+IL-BR-01 makes **everything but the wording** immutable, so `authorId`, `direction`,
+`durationSeconds`, `outcome`, `visibility`, `source` and `correctsId` are refused with the same
+`422` — changing an outcome after the fact rewrites what happened as surely as changing the type.
+Any other field is `400`. Checks run existence and scope → authorship → substance → window →
+version: a closed window outranks a stale `If-Match`, because no retry can open it. An edit that
+changes nothing returns `200` without counting against the IL-BR-04 cap or emitting an event.
+
 ---
 
 #### `POST /interactions/{id}/corrections` — append-only amendment
@@ -1382,6 +1399,20 @@ Empty timeline → `200` with `"content": []`.
 ```
 
 Creates a **new** interaction with `corrects_id` set. The original is never mutated. `201 Created`.
+Requires `Idempotency-Key` like every create: a correction sent twice on a flaky connection must
+not appear twice under the original.
+
+What a correction takes from the original, and what it does not:
+
+| Field | Value | Why |
+|---|---|---|
+| `occurredAt` | the original's | Same moment described; the keyset timeline orders by it, so this is what places the pair side by side (IL-BR-03) |
+| `visibility` | the original's | Correcting a private note must not publish the correction |
+| `type`, `direction` | `NOTE`, `INTERNAL` | A correction of a call is not a second call — inheriting the type would count it twice in every report, and CP-BR-08 would refuse to let anyone fix a closed client's record |
+| `durationSeconds`, `outcome` | none, `NOT_APPLICABLE` | Same reason |
+
+A caller who can see a `PRIVATE` note but not read it — an admin — cannot correct it (`403`):
+amending what you may not read is writing blind.
 
 | Status | Code | Cause |
 |---|---|---|

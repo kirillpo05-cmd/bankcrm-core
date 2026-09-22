@@ -58,11 +58,27 @@ public record Interaction(
     }
 
     /**
-     * IL-BR-09: a private note is the author's and an admin's. Supervisors do not see it — a
-     * product decision, not an oversight.
+     * IL-BR-09, first half: whether the caller may know this interaction exists at all. A private
+     * note is visible to its author and to an admin; a supervisor does not learn it is there — a
+     * product decision, not an oversight (§12 Q-07).
      */
     public boolean isVisibleTo(UUID userId, boolean admin) {
         return visibility != InteractionVisibility.PRIVATE || admin || authorId.equals(userId);
+    }
+
+    /**
+     * IL-BR-09, second half: whether the caller may read what it says. For a private note only the
+     * author can. An admin sees that it exists and its metadata, never its body — otherwise
+     * "private" would mean "private from everyone except the people with the most access", and
+     * managers would go back to paper.
+     */
+    public boolean canReadBodyAs(UUID userId) {
+        return visibility != InteractionVisibility.PRIVATE || authorId.equals(userId);
+    }
+
+    /** IL-BR-01's substance stayed put; the wording was touched inside the window. */
+    public boolean isEdited() {
+        return editCount > 0;
     }
 
     /**

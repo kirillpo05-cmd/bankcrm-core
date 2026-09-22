@@ -9,7 +9,8 @@ public final class InteractionErrorCodes {
 
     public static final String CLIENT_NOT_FOUND = "CLIENT_NOT_FOUND";
     public static final String INTERACTION_NOT_FOUND = "INTERACTION_NOT_FOUND";
-    public static final String EDIT_WINDOW_EXPIRED = "EDIT_WINDOW_EXPIRED";
+    /** §6.3 {@code PATCH /interactions/{id}}: the author's 15-minute window is over (IL-BR-02). */
+    public static final String INTERACTION_EDIT_WINDOW_CLOSED = "INTERACTION_EDIT_WINDOW_CLOSED";
 
     private InteractionErrorCodes() {}
 }

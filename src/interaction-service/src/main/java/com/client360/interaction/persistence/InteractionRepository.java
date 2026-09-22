@@ -123,9 +123,15 @@ public class InteractionRepository {
      * One page of the client's timeline, newest first (IL-US-01). {@code limit} is fetched plus
      * one so the caller can tell whether another page exists without a second count query.
      */
-    public List<Interaction> timeline(TimelineQuery query, int limit) {
+    public List<TimelineRow> timeline(TimelineQuery query, int limit) {
         Cursor cursor = query.cursor();
         return jdbc.sql("SELECT " + COLUMNS + """
+                         , EXISTS (SELECT 1 FROM interactions c
+                                    WHERE c.corrects_id = interactions.id AND c.deleted_at IS NULL)
+                               AS has_correction
+                         , (SELECT count(*) FROM interaction_attachments a
+                             WHERE a.interaction_id = interactions.id AND a.deleted_at IS NULL)
+                               AS attachment_count
                          FROM interactions
                          WHERE client_id = :clientId
                            AND deleted_at IS NULL
@@ -143,6 +149,52 @@ public class InteractionRepository {
                 .param("viewerId", query.viewerId())
                 .param("viewerIsAdmin", query.viewerIsAdmin())
                 .param("limit", limit)
+                .query((rs, n) ->
+                        new TimelineRow(map(rs, n), rs.getBoolean("has_correction"), rs.getInt("attachment_count")))
+                .list();
+    }
+
+    /**
+     * IL-BR-01/02: the author rewrites the wording, inside the window, of a row that has not moved.
+     *
+     * <p>The window is in the {@code WHERE} clause, measured by PostgreSQL's clock, not only checked
+     * in Java beforehand. An edit that starts at 14:59 and commits at 15:01 must not land, and the
+     * only clock that decides that the same way for every instance is the database's (rule 7).
+     * Empty means one of those conditions failed; the caller re-reads to say which.
+     */
+    public Optional<Interaction> updateContent(
+            UUID id, String subject, String body, int expectedVersion, UUID authorId) {
+        return jdbc.sql("""
+                        UPDATE interactions SET
+                            subject     = :subject,
+                            body_enc    = :bodyEnc,
+                            key_version = :keyVersion,
+                            edited_at   = now(),
+                            edit_count  = edit_count + 1,
+                            version     = version + 1,
+                            updated_at  = now()
+                        WHERE id = :id
+                          AND version = :expectedVersion
+                          AND author_id = :authorId
+                          AND deleted_at IS NULL
+                          AND created_at > now() - INTERVAL '15 minutes'
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("subject", subject)
+                .param("bodyEnc", cipher.encrypt(body, AAD_BODY))
+                .param("keyVersion", cipher.currentKeyVersion())
+                .param("expectedVersion", expectedVersion)
+                .param("authorId", authorId)
+                .query(this::map)
+                .optional();
+    }
+
+    /** IL-BR-03: every correction of one original, oldest first — the order they were made in. */
+    public List<Interaction> findCorrections(UUID originalId) {
+        return jdbc.sql("SELECT " + COLUMNS
+                        + " FROM interactions WHERE corrects_id = :id AND deleted_at IS NULL ORDER BY created_at, id")
+                .param("id", originalId)
                 .query(this::map)
                 .list();
     }
@@ -197,6 +249,14 @@ public class InteractionRepository {
             String externalRef,
             UUID authorId,
             UUID correctsId) {}
+
+    /**
+     * A timeline row with the two facts the feed shows about it that live on other rows (§6.3).
+     *
+     * @param hasCorrection another interaction corrects this one, so the feed renders the pair
+     *     together with this one visibly superseded (IL-BR-03)
+     */
+    public record TimelineRow(Interaction interaction, boolean hasCorrection, int attachmentCount) {}
 
     /**
      * @param viewerIsAdmin the one role that sees private notes (IL-BR-09); resolved from a
