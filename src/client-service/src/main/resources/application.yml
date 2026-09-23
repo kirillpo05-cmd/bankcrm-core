@@ -60,6 +60,12 @@ client360:
       public-key: ${CLIENT360_JWT_PUBLIC_KEY:}
       public-key-location: ${CLIENT360_JWT_PUBLIC_KEY_LOCATION:}
       issuer: ${CLIENT360_JWT_ISSUER:}
+  interaction-service:
+    # Read by GET /clients/{id}/summary only, for the timeline panel of the card.
+    base-url: ${CLIENT360_INTERACTION_SERVICE_URL:http://localhost:8081}
+    # The §5.3 sub-resource budget. It bounds one panel, never the whole card: past it the
+    # panel is reported in `degraded[]` and the card still paints.
+    timeout: ${CLIENT360_INTERACTION_SERVICE_TIMEOUT:800ms}
 
 logging:
   level:

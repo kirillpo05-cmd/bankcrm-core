@@ -757,6 +757,16 @@ The single call that backs the card's first paint. Aggregates profile + last 10 
 
 `degraded` lists sub-resources that failed to load (e.g. `["products"]`) — the client renders the `partial` state for exactly those panels instead of failing the whole screen. Sub-resource timeout is 800 ms; the aggregate never exceeds 1.2 s.
 
+**What `degraded` does and does not mean.** An empty panel that is *not* named in `degraded` is an assertion about the client: there is nothing there. A panel named in `degraded` asserts nothing — it could not be loaded. The two must never be conflated, because a manager reading the card before a call will act on "no open tasks" and will not act on "could not load".
+
+Three consequences:
+
+- **`openTasks` is named in `degraded` on every response until Task/Reminder ships in v3** (§11.1), and `openTasks` is `[]`. The module does not exist, so "nothing due" is not a claim this endpoint may make.
+- **`recentInteractions` is `[]` and *not* named in `degraded`** for a caller who holds `client:read` but not `interaction:read`. The panel is not broken, it is not theirs; naming it would invite a retry that can never succeed. In the §9.2.8 seed no such caller exists, but RB-BR-03 composes roles freely, so the endpoint checks rather than assumes.
+- **The profile is not a degradable sub-resource.** If it cannot be read the whole call fails, with the ordinary ER-01 `404`.
+
+**Fan-out and the hop count.** `recentInteractions` comes from interaction-service over REST, so client-service calls out for it while interaction-service calls back here to authorize the timeline — three hops for one summary. The 800 ms sub-resource budget is what keeps that bounded: past it the panel degrades and the card still paints, so a slow interaction-service costs a panel rather than a request thread. Collapsing this to two hops needs service-to-service authentication, so that interaction-service can trust a pre-authorized call without reopening ER-01; until that exists, the third hop stays.
+
 ---
 
 #### `PATCH /clients/{id}` — update

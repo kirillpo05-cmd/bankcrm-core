@@ -207,6 +207,9 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
       CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
+      # The card's timeline panel (GET /clients/{id}/summary). Deliberately not a depends_on:
+      # interaction-service being down degrades that one panel, never the card.
+      CLIENT360_INTERACTION_SERVICE_URL: http://interaction-service:8080
     ports:
       - "8080:8080"
 

@@ -86,6 +86,10 @@ public abstract class AbstractIntegrationTest {
         registry.add("client360.crypto.pepper", () -> "ZGV2LW9ubHktcGVwcGVyLXJlcGxhY2UtbWUtcGxlYXNl");
         registry.add("client360.security.jwt.public-key", TestJwt::publicKeyPem);
 
+        // Port 0 is never listenable, so any test that reaches the real feed client fails fast
+        // instead of hanging. The card tests replace the bean outright.
+        registry.add("client360.interaction-service.base-url", () -> "http://localhost:0");
+
         // Events are asserted where rule 3 puts them — in outbox_events, in the same transaction
         // as the business change. Publishing to a broker is OutboxRelay's own concern.
         registry.add("client360.outbox.relay.enabled", () -> "false");

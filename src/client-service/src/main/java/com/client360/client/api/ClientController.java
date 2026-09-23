@@ -3,6 +3,7 @@ package com.client360.client.api;
 import com.client360.client.domain.ClientSegment;
 import com.client360.client.domain.ClientStatus;
 import com.client360.client.domain.KycStatus;
+import com.client360.client.service.ClientCardService;
 import com.client360.client.service.ClientService;
 import com.client360.common.idempotency.IdempotencyService;
 import com.client360.common.security.CurrentUser;
@@ -37,11 +38,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class ClientController {
 
     private final ClientService clients;
+    private final ClientCardService cards;
     private final IdempotencyService idempotency;
     private final ClientPatchReader patches;
 
-    public ClientController(ClientService clients, IdempotencyService idempotency, ClientPatchReader patches) {
+    public ClientController(
+            ClientService clients, ClientCardService cards, IdempotencyService idempotency, ClientPatchReader patches) {
         this.clients = clients;
+        this.cards = cards;
         this.idempotency = idempotency;
         this.patches = patches;
     }
@@ -108,6 +112,18 @@ public class ClientController {
         return ResponseEntity.ok()
                 .header(HttpHeaders.ETAG, ETags.of(client.version()))
                 .body(client);
+    }
+
+    /**
+     * {@code GET /clients/{id}/summary} (CP-US-02, S-CP-02) — the card's first paint.
+     *
+     * <p>No {@code ETag}: the body aggregates resources owned by two services and changes whenever
+     * either does, so a version taken from the client row alone would go stale without changing,
+     * and {@code If-Match} on it would guard nothing.
+     */
+    @GetMapping("/{id}/summary")
+    public ClientCardResponse summary(@PathVariable UUID id, CurrentUser caller) {
+        return cards.card(id, caller);
     }
 
     /**

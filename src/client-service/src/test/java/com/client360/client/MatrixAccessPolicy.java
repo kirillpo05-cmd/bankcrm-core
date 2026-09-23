@@ -70,7 +70,13 @@ public class MatrixAccessPolicy implements AccessPolicy {
                     Permissions.CLIENT_KYC, Scope.ALL,
                     Permissions.CLIENT_ERASE, Scope.ALL,
                     Permissions.PRODUCT_READ, Scope.ALL,
-                    Permissions.INTERACTION_READ, Scope.ALL));
+                    Permissions.INTERACTION_READ, Scope.ALL),
+            // Not a §9.2.8 role. Every seeded role that holds client:read also holds
+            // interaction:read, so without this one nothing could prove the client card checks
+            // the second permission instead of inferring it from the first. RB-BR-03 composes
+            // roles freely, so the combination is reachable in production.
+            "PROFILE_ONLY",
+            Map.of(Permissions.CLIENT_READ, Scope.ALL, Permissions.PRODUCT_READ, Scope.ALL));
 
     /** RB-BR-03: several roles granting one permission yield the widest scope among them. */
     @Override
