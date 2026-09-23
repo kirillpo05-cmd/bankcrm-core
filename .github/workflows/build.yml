@@ -40,6 +40,28 @@ jobs:
       - name: ./mvnw verify
         run: ./mvnw -B -ntp verify
 
+  # Its own job, not a step inside `verify`: someone whose only mistake is a rewrapped line
+  # should read that off the job name in seconds, not out of the tail of a test log.
+  format:
+    name: spotless
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # CLAUDE.md → Commands promises `./mvnw spotless:apply` before committing. Until this gate
+      # existed the promise was false: the formatter would have rewritten 17 committed files in
+      # src/common, so anyone who followed the instruction produced a diff full of other people's
+      # code. Enforced, the command means what it says.
+      - name: ./mvnw spotless:check
+        run: ./mvnw -B -ntp spotless:check
+
   migrations:
     name: migrations are forward-only
     runs-on: ubuntu-latest

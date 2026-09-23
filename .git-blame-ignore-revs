@@ -1,0 +1,9 @@
+# Revisions that only move whitespace. `git blame` skips them, so a line points at the commit
+# that wrote the logic rather than the one that rewrapped it.
+#
+# Local git needs to be told once:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub's blame view reads this file on its own.
+
+# style(common): apply spotless, no behaviour change
+6d721f71ab1c06975cad9683066faa071ddb852b
