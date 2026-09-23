@@ -16,7 +16,6 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Component;
@@ -49,8 +48,7 @@ public class ClientPatchReader {
         Map<Field, Object> values = new EnumMap<>(Field.class);
         List<String[]> problems = new ArrayList<>();
 
-        for (Iterator<Map.Entry<String, JsonNode>> it = body.fields(); it.hasNext(); ) {
-            Map.Entry<String, JsonNode> entry = it.next();
+        for (Map.Entry<String, JsonNode> entry : body.properties()) {
             String name = entry.getKey();
             JsonNode node = entry.getValue();
 

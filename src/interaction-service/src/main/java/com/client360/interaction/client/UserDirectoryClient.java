@@ -12,8 +12,8 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.ClientHttpRequestFactories;
-import org.springframework.boot.web.client.ClientHttpRequestFactorySettings;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -40,9 +40,10 @@ public class UserDirectoryClient {
             @Value("${client360.client-service.base-url}") String baseUrl,
             @Value("${client360.client-service.timeout:2s}") Duration timeout) {
         this.rest = builder.baseUrl(baseUrl)
-                .requestFactory(ClientHttpRequestFactories.get(ClientHttpRequestFactorySettings.DEFAULTS
-                        .withConnectTimeout(timeout)
-                        .withReadTimeout(timeout)))
+                .requestFactory(ClientHttpRequestFactoryBuilder.detect()
+                        .build(ClientHttpRequestFactorySettings.defaults()
+                                .withConnectTimeout(timeout)
+                                .withReadTimeout(timeout)))
                 .build();
     }
 

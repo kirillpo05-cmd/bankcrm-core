@@ -69,6 +69,22 @@
         </pluginManagement>
 
         <plugins>
+            <!--
+              javac reports a "marked for removal" deprecation with a file and line, but collapses
+              every ordinary one into a single "recompile with -Xlint:deprecation for details"
+              note. That is how two deprecated Jackson calls sat in the PATCH readers unnoticed.
+              With the flag each one carries its own location, and CI turns it into an annotation.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <compilerArgs>
+                        <arg>-Xlint:deprecation</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
             <!-- ./mvnw spotless:apply  — format before committing (CLAUDE.md → Commands). -->
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>

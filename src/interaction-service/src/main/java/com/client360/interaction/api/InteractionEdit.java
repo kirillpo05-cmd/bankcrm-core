@@ -4,7 +4,6 @@ import com.client360.common.api.ApiException;
 import com.client360.common.api.ErrorCodes;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -54,8 +53,7 @@ public record InteractionEdit(String subject, String body, List<String> immutabl
         List<String> immutable = new ArrayList<>();
         List<Map.Entry<String, String>> problems = new ArrayList<>();
 
-        for (Iterator<Map.Entry<String, JsonNode>> it = node.fields(); it.hasNext(); ) {
-            Map.Entry<String, JsonNode> field = it.next();
+        for (Map.Entry<String, JsonNode> field : node.properties()) {
             String name = field.getKey();
             JsonNode value = field.getValue();
             switch (name) {

@@ -8,7 +8,8 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.ClientHttpRequestFactorySettings;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.boot.web.client.RestClientCustomizer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
@@ -40,9 +41,11 @@ public class ClientAccessClient {
             RestClient.Builder builder,
             @Value("${client360.client-service.base-url}") String baseUrl,
             @Value("${client360.client-service.timeout:2s}") Duration timeout) {
+        // Both timeouts are set deliberately: an authorization call that hangs is worse than one
+        // that fails, because the request above it waits on an answer that is never coming.
         this.rest = builder.baseUrl(baseUrl)
-                .requestFactory(org.springframework.boot.web.client.ClientHttpRequestFactories.get(
-                        ClientHttpRequestFactorySettings.DEFAULTS
+                .requestFactory(ClientHttpRequestFactoryBuilder.detect()
+                        .build(ClientHttpRequestFactorySettings.defaults()
                                 .withConnectTimeout(timeout)
                                 .withReadTimeout(timeout)))
                 .build();
