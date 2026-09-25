@@ -90,15 +90,20 @@ docker compose logs flyway-client        # migration output
 docker compose down -v                   # reset everything, including data
 ```
 
-Once `src/` has buildable modules:
+The services themselves (`client-service` on 8080, `interaction-service` on 8081;
+`audit-service` joins in v2):
 
 ```bash
-docker compose --profile app up -d       # add the three services
+scripts/dev-jwt.sh keys                  # once: RSA keypair -> paste the line into .env
+docker compose --profile app up -d --build
+scripts/dev-jwt.sh token <user-uuid> MANAGER   # a token to call the API with
 ./mvnw -pl src/client-service test       # one service's tests
 ./mvnw verify                            # full build + Testcontainers integration tests
-./mvnw spotless:apply                    # format before committing
-curl localhost:8082/api/v1/audit/health  # ingestion lag per partition
+./mvnw spotless:apply                    # format before committing (CI gates on spotless:check)
 ```
+
+Nothing issues tokens until `POST /auth/login` arrives with RBAC in v2, so `dev-jwt.sh` stands
+in for the issuer. Its private key lives in `.dev/`, which is git-ignored.
 
 Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATHCONV=1`.
 

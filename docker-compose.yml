@@ -189,10 +189,22 @@ services:
       "
 
   # ------------------------------------------------- Application services
-  # Enabled once src/ contains buildable modules: docker compose --profile app up
+  #   docker compose --profile app up -d --build
+  #
+  # Both build from the repository root with one Dockerfile: the Maven reactor needs the parent
+  # pom, the sibling `common` module and db/migrations, so a service directory is not a usable
+  # build context.
+  #
+  # Neither service declares depends_on the other, and that is deliberate. client-service reads the
+  # timeline for the card and interaction-service asks client-service to authorize — the dependency
+  # is mutual, so any ordering here would be a lie, and compose would reject the cycle. Each starts
+  # alone and degrades until the other answers.
   client-service:
     profiles: ["app"]
-    build: ./src/client-service
+    build:
+      context: .
+      args:
+        SERVICE: client-service
     container_name: client360-client-service
     depends_on:
       flyway-client:
@@ -207,15 +219,20 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
       CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
-      # The card's timeline panel (GET /clients/{id}/summary). Deliberately not a depends_on:
-      # interaction-service being down degrades that one panel, never the card.
+      # RS256 verification key. Nothing issues tokens yet — POST /auth/login ships with RBAC in
+      # v2 (§11.1) — so locally it comes from scripts/dev-jwt.sh.
+      CLIENT360_JWT_PUBLIC_KEY: ${CLIENT360_JWT_PUBLIC_KEY}
+      # The card's timeline panel (GET /clients/{id}/summary).
       CLIENT360_INTERACTION_SERVICE_URL: http://interaction-service:8080
     ports:
       - "8080:8080"
 
   interaction-service:
     profiles: ["app"]
-    build: ./src/interaction-service
+    build:
+      context: .
+      args:
+        SERVICE: interaction-service
     container_name: client360-interaction-service
     depends_on:
       flyway-interaction:
@@ -233,24 +250,18 @@ services:
       CLIENT360_S3_ENDPOINT: http://minio:9000
       CLIENT360_S3_BUCKET: client360-attachments
       CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
+      CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
+      CLIENT360_JWT_PUBLIC_KEY: ${CLIENT360_JWT_PUBLIC_KEY}
+      # The authorization authority (§3.1). Without this the default points at localhost, which
+      # inside a container is this service itself, and every access check would fail.
+      CLIENT360_CLIENT_SERVICE_URL: http://client-service:8080
     ports:
       - "8081:8080"
 
-  audit-service:
-    profiles: ["app"]
-    build: ./src/audit-service
-    container_name: client360-audit-service
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      SPRING_PROFILES_ACTIVE: local
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=audit
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    ports:
-      - "8082:8080"
+  # audit-service joins in v2 (§11.1). src/audit-service holds no module yet, so a service
+  # definition here would only break `--profile app` for everyone. Its topics are already being
+  # written: the outbox publishes from day one and the consumer arrives later, which is the whole
+  # point of the ordering.
 
 volumes:
   pgdata:

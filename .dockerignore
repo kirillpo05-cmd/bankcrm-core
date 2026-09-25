@@ -1,0 +1,30 @@
+# The build context is the repository root, so everything not needed to package a jar is
+# excluded here. This is not only about speed: a context that carries .env or .dev/jwt.key
+# hands local secrets to every build layer that copies broadly.
+
+.git/
+.github/
+.claude/
+
+# Local secrets and dev key material. Never in an image.
+.env
+.env.*
+!.env.example
+.dev/
+*.pem
+*.p12
+*.jks
+
+# Build output — the image builds its own.
+target/
+**/target/
+build/
+out/
+
+# Docs and tooling that no jar contains.
+*.md
+!db/README.md
+node_modules/
+.idea/
+.vscode/
+*.iml

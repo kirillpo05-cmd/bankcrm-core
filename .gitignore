@@ -41,3 +41,6 @@ logs/
 tmp/
 
 .claude/worktrees/
+
+# Local JWT key material from scripts/dev-jwt.sh. The private key lives here.
+.dev/
