@@ -122,7 +122,7 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 
 ## Testing
 
-256 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+231 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
