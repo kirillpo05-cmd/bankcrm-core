@@ -168,6 +168,21 @@ public class ClientProductRepository {
     }
 
     /** A validated product as core banking reported it. */
+    /**
+     * Re-points one product to the survivor of a merge (CP-BR-10).
+     *
+     * <p>One at a time rather than a bulk {@code UPDATE … SET client_id}, because
+     * {@code uq_products_external} would fail the whole statement on the first collision and take
+     * the non-conflicting products down with it. The caller has already decided which ones move.
+     */
+    public void repointToSurvivor(UUID productId, UUID survivorId) {
+        jdbc.sql("UPDATE client_products SET client_id = :survivorId, updated_at = now(),"
+                        + " version = version + 1 WHERE id = :id")
+                .param("survivorId", survivorId)
+                .param("id", productId)
+                .update();
+    }
+
     public record NewProduct(
             UUID id,
             UUID clientId,

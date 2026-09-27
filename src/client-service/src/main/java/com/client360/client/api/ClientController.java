@@ -92,6 +92,22 @@ public class ClientController {
     }
 
     /**
+     * {@code POST /clients/merge} (CP-US-06). Declared before {@code /{id}} for the same reason as
+     * {@code /lookup}: {@code merge} is a literal segment, not somebody's client id.
+     *
+     * <p>{@code Idempotency-Key} required (§4.6). A merge is irreversible (CP-BR-10), so a retried
+     * request must return the first answer rather than attempt a second merge whose loser has
+     * already stopped being a record.
+     */
+    @PostMapping("/merge")
+    public ResponseEntity<Object> merge(
+            @RequestHeader(value = IdempotencyService.HEADER, required = false) String idempotencyKey,
+            @Valid @RequestBody MergeRequest request,
+            CurrentUser caller) {
+        return idempotency.execute(idempotencyKey, request, () -> ResponseEntity.ok(clients.merge(request, caller)));
+    }
+
+    /**
      * {@code GET /clients/lookup} (CP-US-01). Declared before no path variable can shadow it:
      * {@code lookup} is a literal segment and Spring matches it ahead of {@code /{id}}.
      */

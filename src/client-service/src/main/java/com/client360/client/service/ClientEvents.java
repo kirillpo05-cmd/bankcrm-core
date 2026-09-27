@@ -119,6 +119,35 @@ public class ClientEvents {
     }
 
     /**
+     * CP-BR-10: two records became one. Emitted against the <em>loser</em>, because that is the id
+     * whose meaning changed and the id every consumer still holds references to.
+     *
+     * <p>{@code context} carries the survivor's owner and team, not just its id. interaction-service
+     * re-points the loser's interactions on this event and has to re-scope them at the same time
+     * (V6 there); without these it would have to ask, and a consumer that makes a REST call per
+     * message is a consumer that stops when the callee does.
+     */
+    public void merged(
+            Client loser, Client survivor, String reason, int movedProducts, java.util.List<String> skipped) {
+        ChangedFields changes = ChangedFields.create()
+                .put("mergedIntoId", null, survivor.id())
+                .put("deletedAt", null, loser.deletedAt());
+        append(
+                loser.id(),
+                events.event("client.merged", ENTITY, loser.id())
+                        .clientId(loser.id())
+                        .action("MERGE")
+                        .changes(changes)
+                        .context("survivorId", survivor.id())
+                        .context("survivorOwnerId", survivor.ownerManagerId())
+                        .context("survivorTeamId", survivor.teamId())
+                        .context("reason", reason)
+                        .context("movedProducts", movedProducts)
+                        .context("skippedProducts", skipped)
+                        .build());
+    }
+
+    /**
      * §4.9 soft delete. The row survives — audit rows reference {@code client_id} and must stay
      * resolvable — so this records the intent, not a disappearance.
      */

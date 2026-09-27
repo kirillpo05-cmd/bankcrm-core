@@ -37,6 +37,21 @@ class InternalEndpointsIntegrationTest extends AbstractIntegrationTest {
                     .andExpect(jsonPath("$.firstName").doesNotExist());
         }
 
+        /**
+         * IL-BR-07 / TR-BR-14: the ticket SLA is measured in the owning team's business hours, and
+         * interaction-service holds no teams table. The zone rides on the answer it already asks
+         * for, so a ticket write stays one call.
+         */
+        @Test
+        void carriesTheOwningTeamsTimezone_TR_BR_14() throws Exception {
+            String id = createClient(ADAM_NOWAK, "CIF-1", "a@example.com", "+48511234567");
+            mvc.perform(access(id, "ticket:write", ADAM_NOWAK, "MANAGER"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.teamTimezone").value("Europe/Warsaw"))
+                    // Still a decision, not a card.
+                    .andExpect(jsonPath("$.email").doesNotExist());
+        }
+
         /** CP-BR-13: an authorization check is not a disclosure, so it writes no audit row. */
         @Test
         void auditsNoDisclosure_CP_BR_13() throws Exception {

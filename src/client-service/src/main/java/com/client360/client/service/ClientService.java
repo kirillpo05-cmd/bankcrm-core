@@ -2,6 +2,7 @@ package com.client360.client.service;
 
 import static com.client360.common.security.Permissions.CLIENT_DELETE;
 import static com.client360.common.security.Permissions.CLIENT_KYC;
+import static com.client360.common.security.Permissions.CLIENT_MERGE;
 import static com.client360.common.security.Permissions.CLIENT_READ;
 import static com.client360.common.security.Permissions.CLIENT_REASSIGN;
 import static com.client360.common.security.Permissions.CLIENT_WRITE;
@@ -18,27 +19,34 @@ import com.client360.client.api.CreateClientRequest;
 import com.client360.client.api.KycTransitionRequest;
 import com.client360.client.api.LookupResponse;
 import com.client360.client.api.LookupResponse.MatchType;
+import com.client360.client.api.MergeRequest;
+import com.client360.client.api.MergeResponse;
 import com.client360.client.api.ReassignRequest;
 import com.client360.client.api.ReassignResponse;
 import com.client360.client.domain.Client;
+import com.client360.client.domain.ClientProduct;
 import com.client360.client.domain.ClientStatus;
 import com.client360.client.domain.KycStatus;
+import com.client360.client.domain.ProductStatus;
 import com.client360.client.persistence.ClientProductRepository;
 import com.client360.client.persistence.ClientRepository;
 import com.client360.client.persistence.ClientRepository.ClientSearch;
 import com.client360.client.persistence.ClientRepository.NewClient;
 import com.client360.client.persistence.ClientRepository.SortField;
+import com.client360.client.persistence.TeamRepository;
 import com.client360.client.persistence.UserRepository;
 import com.client360.client.support.Emails;
 import com.client360.client.support.PhoneNumbers;
 import com.client360.common.api.ApiException;
 import com.client360.common.api.ErrorCodes;
 import com.client360.common.id.UuidV7;
+import com.client360.common.ratelimit.RateLimiter;
 import com.client360.common.security.CurrentUser;
 import com.client360.common.security.Permissions;
 import com.client360.common.security.Scope;
 import com.client360.common.time.DatabaseClock;
 import com.client360.common.web.OffsetPage;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -62,6 +70,10 @@ public class ClientService {
 
     /** A disambiguation list, not a report. Beyond this the manager should refine the query. */
     private static final int LOOKUP_LIMIT = 25;
+    /** §4.10: the PII-enumeration guard on lookup — 60 a minute, per user. */
+    private static final int LOOKUP_LIMIT_PER_MINUTE = 60;
+
+    private static final String LOOKUP_BUCKET = "clients.lookup";
 
     private static final int MIN_QUERY_LENGTH = 3;
 
@@ -71,29 +83,35 @@ public class ClientService {
     private final ClientRepository clients;
     private final ClientProductRepository products;
     private final UserRepository users;
+    private final TeamRepository teams;
     private final ClientAccess access;
     private final ClientEvents events;
     private final ClientAssembler assembler;
     private final PhoneNumbers phones;
     private final DatabaseClock clock;
+    private final RateLimiter rateLimiter;
 
     public ClientService(
             ClientRepository clients,
             ClientProductRepository products,
             UserRepository users,
+            TeamRepository teams,
             ClientAccess access,
             ClientEvents events,
             ClientAssembler assembler,
             PhoneNumbers phones,
-            DatabaseClock clock) {
+            DatabaseClock clock,
+            RateLimiter rateLimiter) {
         this.clients = clients;
         this.products = products;
         this.users = users;
+        this.teams = teams;
         this.access = access;
         this.events = events;
         this.assembler = assembler;
         this.phones = phones;
         this.clock = clock;
+        this.rateLimiter = rateLimiter;
     }
 
     // ------------------------------------------------------------------- create
@@ -288,7 +306,133 @@ public class ClientService {
         Client client = requireLive(clients.findById(clientId), clientId);
         requireCovering(client, caller, permission);
         return new ClientAccessView(
-                client.id(), client.ownerManagerId(), client.teamId(), client.status(), client.kycStatus());
+                client.id(),
+                client.ownerManagerId(),
+                client.teamId(),
+                client.status(),
+                client.kycStatus(),
+                teams.timezoneOf(client.teamId()).orElse(null));
+    }
+
+    // ------------------------------------------------------------------- merge
+
+    /**
+     * {@code POST /clients/merge} (CP-US-06). Admin only, and irreversible through the API
+     * (CP-BR-10, Q-08).
+     *
+     * <p>The order matters and is not arbitrary: the loser is marked merged — which soft-deletes it
+     * — <em>before</em> the survivor adopts any of its fields. Email and tax ID are unique among
+     * non-deleted clients (CP-BR-02), so handing the survivor the loser's email while the loser
+     * still holds it would collide with the very index that makes duplicates findable.
+     *
+     * <p>What this transaction does not do is move interactions. They belong to interaction-service
+     * and no transaction spans both, so they follow the {@code client.merged} event. The response
+     * says so rather than reporting a number this service cannot know; until the consumer catches
+     * up the loser's history is still reachable, because the {@code 410} carries a {@code Location}
+     * to the survivor.
+     */
+    @Transactional
+    public MergeResponse merge(MergeRequest request, CurrentUser caller) {
+        if (request.survivorId().equals(request.mergedId())) {
+            throw ApiException.businessRule("A client cannot be merged into itself.")
+                    .detail("field", "mergedId", "issue", "must differ from survivorId");
+        }
+        access.scopeOf(caller, CLIENT_MERGE)
+                .orElseThrow(() -> ApiException.forbidden(
+                                ErrorCodes.ROLE_REQUIRED,
+                                "Merging clients requires the " + CLIENT_MERGE + " permission.")
+                        .detail("permission", CLIENT_MERGE));
+
+        // Loaded including merged records, deliberately. requireLive answers a merged id with the
+        // 410 a read deserves, but a merge is a write whose precondition failed — §5.3 asks for
+        // 409 here, and going through the read path would make that answer unreachable.
+        Client survivor = mergeCandidate(request.survivorId());
+        Client loser = mergeCandidate(request.mergedId());
+        requireCovering(survivor, caller, CLIENT_MERGE);
+        requireCovering(loser, caller, CLIENT_MERGE);
+
+        // CP-EC-09 allows chains, so being a survivor already is fine; being a loser already is
+        // not — that record has stopped being a record and has no history left to give.
+        if (survivor.isMerged() || loser.isMerged()) {
+            throw ApiException.conflict(
+                            ErrorCodes.ILLEGAL_STATE_TRANSITION,
+                            "A record that was already merged cannot be merged again.")
+                    .detail("survivorMerged", survivor.isMerged(), "mergedMerged", loser.isMerged());
+        }
+
+        List<ClientProduct> loserProducts = products.findByClient(loser.id(), null, null);
+        List<ClientProduct> movable = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+        for (ClientProduct product : loserProducts) {
+            Optional<ClientProduct> clash = products.findByExternalId(survivor.id(), product.externalProductId());
+            if (clash.isEmpty()) {
+                movable.add(product);
+                continue;
+            }
+            // §5.3: two ACTIVE records of the same core-banking product is broken data, not debris
+            // for a merge to tidy — refuse the whole thing and let a human look. CP-BR-10's "skip
+            // and report" is for the rest, where a duplicate of a closed account is exactly what
+            // deduplication is meant to clear away.
+            if (product.status() == ProductStatus.ACTIVE && clash.get().status() == ProductStatus.ACTIVE) {
+                throw ApiException.businessRule(
+                                "Both clients hold an ACTIVE product with the same external id; resolve it in core banking first.")
+                        .detail("externalProductId", product.externalProductId());
+            }
+            skipped.add(product.externalProductId());
+        }
+
+        Client mergedLoser = clients.markMerged(loser.id(), survivor.id(), loser.version(), caller.id())
+                .orElseThrow(() -> versionConflict(loser, caller));
+        Client adopted = applyFieldResolution(survivor, loser, request, caller);
+        movable.forEach(product -> products.repointToSurvivor(product.id(), survivor.id()));
+
+        events.merged(mergedLoser, adopted, request.reason(), movable.size(), skipped);
+        return new MergeResponse(
+                assembler.toResponse(adopted, caller, clock.now()),
+                new MergeResponse.Moved(movable.size()),
+                new MergeResponse.Skipped(List.copyOf(skipped)),
+                // Tasks are v3 (§11.1), so there is nothing of theirs to wait for yet.
+                List.of("interactions"),
+                loser.id());
+    }
+
+    /** Absent or soft-deleted is {@code 404}; already merged falls through to the {@code 409}. */
+    private Client mergeCandidate(UUID id) {
+        return clients.findAnyById(id)
+                .filter(client -> client.isMerged() || client.deletedAt() == null)
+                .orElseThrow(ClientAccess::notFound);
+    }
+
+    /**
+     * The survivor adopts whichever contested fields the caller asked for (CP-US-06).
+     *
+     * <p>Values travel as decrypted domain fields and are re-encrypted by the repository on the way
+     * back down, so nothing here copies ciphertext between rows and the survivor's {@code
+     * key_version} stays its own.
+     */
+    private Client applyFieldResolution(Client survivor, Client loser, MergeRequest request, CurrentUser caller) {
+        if (request.fieldResolution().values().stream().noneMatch(source -> source == MergeRequest.Source.MERGED)) {
+            return survivor;
+        }
+        Client adopted = survivor.withProfile(
+                survivor.firstName(),
+                survivor.lastName(),
+                request.takesFromMerged(MergeRequest.Field.MIDDLE_NAME) ? loser.middleName() : survivor.middleName(),
+                request.takesFromMerged(MergeRequest.Field.DATE_OF_BIRTH)
+                        ? loser.dateOfBirth()
+                        : survivor.dateOfBirth(),
+                request.takesFromMerged(MergeRequest.Field.EMAIL) ? loser.email() : survivor.email(),
+                request.takesFromMerged(MergeRequest.Field.PHONE) ? loser.phone() : survivor.phone(),
+                request.takesFromMerged(MergeRequest.Field.TAX_ID) ? loser.taxId() : survivor.taxId(),
+                request.takesFromMerged(MergeRequest.Field.ADDRESS) ? loser.address() : survivor.address(),
+                survivor.preferredChannel(),
+                survivor.segment(),
+                // Status and risk are not the caller's to change here: each has its own path, and
+                // a deduplication must not become a back door into either.
+                survivor.status(),
+                survivor.risk());
+        return clients.update(adopted, survivor.version(), caller.id())
+                .orElseThrow(() -> versionConflict(survivor, caller));
     }
 
     // --------------------------------------------------------------- ownership
@@ -629,6 +773,12 @@ public class ClientService {
     @Transactional
     public LookupResponse lookup(String email, String phone, String externalRef, String q, CurrentUser caller) {
         Scope scope = access.requireScope(caller, CLIENT_READ);
+        // §4.10: 60 a minute per user. This endpoint answers "does a client with this email exist"
+        // across the whole book — the narrow ER-01 exception that lets a manager raise a
+        // break-glass request (RB-US-05) — so it is also the one endpoint an attacker would use to
+        // enumerate customers. Counted before the query runs, and outside this transaction, so a
+        // probe that ends in an error still costs the prober a request.
+        rateLimiter.check(caller.id().toString(), LOOKUP_BUCKET, LOOKUP_LIMIT_PER_MINUTE, Duration.ofMinutes(1));
         Query query = parse(email, phone, externalRef, q);
 
         List<Client> found =

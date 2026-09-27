@@ -1,6 +1,5 @@
 package com.client360.client.api;
 
-import com.client360.client.api.ClientResponse.UserSummary;
 import com.client360.client.persistence.UserRepository;
 import com.client360.common.api.ApiException;
 import com.client360.common.security.CurrentUser;
@@ -36,7 +35,7 @@ public class InternalUserController {
     }
 
     @GetMapping
-    public List<UserSummary> byIds(@RequestParam List<UUID> ids, CurrentUser caller) {
+    public List<InternalUserView> byIds(@RequestParam List<UUID> ids, CurrentUser caller) {
         if (ids.isEmpty()) {
             return List.of();
         }
@@ -44,7 +43,7 @@ public class InternalUserController {
             throw ApiException.validation("ids", "at most " + MAX_IDS + " ids per request");
         }
         return users.findAllByIds(ids).stream()
-                .map(user -> new UserSummary(user.id(), user.fullName()))
+                .map(user -> new InternalUserView(user.id(), user.fullName(), user.primaryTeamId()))
                 .toList();
     }
 }

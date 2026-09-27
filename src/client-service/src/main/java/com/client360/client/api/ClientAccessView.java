@@ -17,7 +17,18 @@ import java.util.UUID;
  * <p>What is here is exactly what a caller must know to apply the client's own rules: CP-BR-08
  * closes a client to everything but notes, and CP-BR-07 turns on {@code kycStatus} and
  * {@code status}.
+ *
+ * @param teamTimezone the owning team's IANA zone, for the business-hours ticket SLA (IL-BR-07,
+ *     TR-BR-14). It rides along here because interaction-service already asks this question on
+ *     every ticket write, and a second endpoint for one string would be a second round trip on the
+ *     hot path. {@code null} only when the client has no team, which CP-BR-03 makes unreachable
+ *     for a live client — the caller still has to decide what to do about it rather than assume.
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record ClientAccessView(
-        UUID clientId, UUID ownerManagerId, UUID teamId, ClientStatus status, KycStatus kycStatus) {}
+        UUID clientId,
+        UUID ownerManagerId,
+        UUID teamId,
+        ClientStatus status,
+        KycStatus kycStatus,
+        String teamTimezone) {}

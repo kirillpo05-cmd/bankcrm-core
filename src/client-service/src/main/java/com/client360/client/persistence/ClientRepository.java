@@ -197,6 +197,34 @@ public class ClientRepository {
      * the team from the new owner in the same transaction (CP-BR-03), and must never happen as a
      * side effect of a contact-details edit.
      */
+    /**
+     * Marks the loser of a merge (CP-BR-10): soft-deleted, pointing at the survivor.
+     *
+     * <p>The row stays — audit rows and re-pointed interactions reference this id and must keep
+     * resolving — and every later read of it becomes a {@code 410} with a {@code Location}, which
+     * {@code merged_into_id} is what makes possible.
+     */
+    public Optional<Client> markMerged(UUID id, UUID survivorId, int expectedVersion, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients SET
+                            merged_into_id = :survivorId,
+                            merged_at = now(),
+                            deleted_at = now(),
+                            deletion_reason = 'MERGED',
+                            updated_at = now(),
+                            updated_by = :actorId,
+                            version = version + 1
+                        WHERE id = :id AND version = :expectedVersion AND deleted_at IS NULL
+                        RETURNING
+                        """ + COLUMNS)
+                .param("id", id)
+                .param("survivorId", survivorId)
+                .param("actorId", actorId)
+                .param("expectedVersion", expectedVersion)
+                .query(this::map)
+                .optional();
+    }
+
     public Optional<Client> reassign(UUID id, UUID newOwnerId, UUID newTeamId, int expectedVersion, UUID actorId) {
         return jdbc.sql("""
                         UPDATE clients SET

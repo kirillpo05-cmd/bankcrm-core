@@ -104,6 +104,7 @@ public abstract class AbstractIntegrationTest {
         jdbc.sql("DELETE FROM client.clients").update();
         jdbc.sql("DELETE FROM client.outbox_events").update();
         jdbc.sql("DELETE FROM client.idempotency_keys").update();
+        jdbc.sql("DELETE FROM client.rate_limit_counters").update();
         seedTeamsAndUsers();
     }
 
