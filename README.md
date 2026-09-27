@@ -60,7 +60,7 @@ Some decisions worth knowing before reading the code:
 | Language / framework | Java 21, Spring Boot 3.5, Spring Security |
 | Database | PostgreSQL 16, Flyway forward-only migrations |
 | Messaging | Apache Kafka (KRaft), transactional outbox |
-| Object storage | MinIO (S3 API), for interaction attachments |
+| Object storage | S3 API — LocalStack locally, a real bucket in a deployment |
 | Build | Maven wrapper, Spotless (Palantir format) |
 | Test | JUnit 5, Testcontainers against a real PostgreSQL |
 | CI | GitHub Actions — build, tests, formatter, migration immutability |
@@ -71,7 +71,7 @@ Everything below works today.
 
 ```bash
 cp .env.example .env
-docker compose up -d                      # Postgres + Kafka + MinIO + both Flyway runs
+docker compose up -d                      # Postgres + Kafka + S3 + all three Flyway runs
 docker compose --profile seed up seed     # 2 teams, 9 users
 ```
 
@@ -143,7 +143,7 @@ client360/
 ├── SPEC.md                  the contract: models, APIs, rules, edge cases
 ├── CLAUDE.md                working agreements for this codebase
 ├── Dockerfile               one file, both services (a single Maven reactor)
-├── docker-compose.yml       Postgres, Kafka, MinIO, Flyway, the services
+├── docker-compose.yml       Postgres, Kafka, S3, Flyway, the services
 ├── .github/workflows/       build, tests, spotless, migration immutability
 ├── .claude/
 │   ├── rules/               per-folder rules, loaded by glob

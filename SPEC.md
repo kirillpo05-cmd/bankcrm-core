@@ -1685,6 +1685,13 @@ filter and the row badge cannot disagree.
 | `GET` | `/interactions/{id}/attachments/{attachmentId}` | `302` to a 60-second pre-signed object-store URL. `409 ATTACHMENT_SCAN_PENDING` while `PENDING`; `403 ATTACHMENT_INFECTED` when `INFECTED`. Emits `READ_SENSITIVE` |
 | `DELETE` | `/interactions/{id}/attachments/{attachmentId}` | Author within the edit window, or admin. `204` |
 
+**The object store is addressed as S3, never as MinIO.** interaction-service uses the AWS SDK, so
+the server behind the endpoint is a configuration choice — LocalStack locally, a real bucket in a
+deployment. That was a deliberate choice when attachments were built, and it paid for itself
+immediately: MinIO withdrew public access to its container images (`docker.io/minio/minio` and
+`quay.io/minio/minio` both answer 401), which broke CI and `docker compose up` on a fresh clone.
+Only `docker-compose.yml` and one test container had to change; no application code did.
+
 **Bytes never pass through this service.** An upload goes straight to the bucket; a download is a
 `302` to a pre-signed link the browser follows itself. Streaming a 10 MB file back through a request
 thread would hold one for the length of somebody's connection and put customer documents in this
@@ -3493,7 +3500,7 @@ Every list endpoint is paginated and every hot query has a covering or partial i
 
 ### 10.7 Local environment
 
-`docker compose up` starts PostgreSQL 16, Kafka (KRaft, single broker), MinIO for object storage, and the three services, with Flyway migrations and a seed dataset (50 clients, 6 users covering every role, 300 interactions, 40 tasks with a mix of overdue and upcoming). One command, per `PROJECT_IDEA.md` §5.
+`docker compose up` starts PostgreSQL 16, Kafka (KRaft, single broker), an S3-compatible object store, and the three services, with Flyway migrations and a seed dataset (50 clients, 6 users covering every role, 300 interactions, 40 tasks with a mix of overdue and upcoming). One command, per `PROJECT_IDEA.md` §5.
 
 ---
 

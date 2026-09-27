@@ -77,11 +77,20 @@
             <artifactId>kafka</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- A real MinIO, for the same reason the tests use a real PostgreSQL: a doubled object
-             store would agree with whatever the code assumed about pre-signing and checksums. -->
+        <!--
+          A real S3 server, for the same reason the tests use a real PostgreSQL: a doubled object
+          store would agree with whatever the code assumed about pre-signing and checksums.
+
+          LocalStack rather than MinIO because MinIO's images stopped being publicly pullable —
+          both docker.io/minio/minio and quay.io/minio/minio answer 401/denied, so CI could not
+          fetch them and neither could a fresh clone. Chainguard publishes MinIO but only at
+          :latest, and an unpinnable test dependency is a build that breaks overnight without a
+          commit. LocalStack validates signatures, which adobe/s3mock does not — and a mock that
+          accepts any signature would make the pre-signed-link test prove nothing.
+        -->
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>minio</artifactId>
+            <artifactId>localstack</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

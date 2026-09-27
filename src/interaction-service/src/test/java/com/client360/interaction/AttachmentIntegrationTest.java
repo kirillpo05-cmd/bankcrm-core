@@ -28,7 +28,8 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.ResultActions;
-import org.testcontainers.containers.MinIOContainer;
+import org.testcontainers.containers.localstack.LocalStackContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * Attachments end to end (SPEC.md §6.3, IL-US-06), against a real MinIO.
@@ -40,26 +41,34 @@ import org.testcontainers.containers.MinIOContainer;
 @Import(AbstractInteractionIntegrationTest.Doubles.class)
 class AttachmentIntegrationTest extends AbstractInteractionIntegrationTest {
 
-    private static final MinIOContainer
-            MINIO = // Pinned to the same image docker-compose.yml runs, so the tests and the local stack
-                    // cannot drift onto different MinIO behaviour.
-                    new MinIOContainer("minio/minio:RELEASE.2024-09-13T20-26-02Z")
-                            .withUserName("client360")
-                            .withPassword("client360_local_only");
+    /**
+     * A real S3 server, pinned to the same image docker-compose.yml runs so the tests and the local
+     * stack cannot drift onto different S3 behaviour.
+     *
+     * <p>LocalStack rather than MinIO: MinIO stopped publishing pullable images — docker.io and
+     * quay.io both answer 401 — so CI could not fetch one and neither could a fresh clone. What
+     * makes the swap cost nothing is that this service speaks the S3 API through the AWS SDK rather
+     * than a MinIO client, so only the endpoint moves.
+     */
+    private static final LocalStackContainer S3 = new LocalStackContainer(
+                    DockerImageName.parse("localstack/localstack:3.8"))
+            .withServices(LocalStackContainer.Service.S3);
 
     private static final String BUCKET = "client360-attachments";
 
     static {
-        MINIO.start();
+        S3.start();
         createBucket();
     }
 
     @DynamicPropertySource
     static void storage(DynamicPropertyRegistry registry) {
-        registry.add("client360.s3.endpoint", MINIO::getS3URL);
+        registry.add(
+                "client360.s3.endpoint",
+                () -> S3.getEndpointOverride(LocalStackContainer.Service.S3).toString());
         registry.add("client360.s3.bucket", () -> BUCKET);
-        registry.add("client360.s3.access-key", MINIO::getUserName);
-        registry.add("client360.s3.secret-key", MINIO::getPassword);
+        registry.add("client360.s3.access-key", S3::getAccessKey);
+        registry.add("client360.s3.secret-key", S3::getSecretKey);
     }
 
     private String interactionId;
@@ -318,11 +327,11 @@ class AttachmentIntegrationTest extends AbstractInteractionIntegrationTest {
 
     private static void createBucket() {
         try (var client = software.amazon.awssdk.services.s3.S3Client.builder()
-                .endpointOverride(URI.create(MINIO.getS3URL()))
-                .region(software.amazon.awssdk.regions.Region.US_EAST_1)
+                .endpointOverride(S3.getEndpointOverride(LocalStackContainer.Service.S3))
+                .region(software.amazon.awssdk.regions.Region.of(S3.getRegion()))
                 .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
                         software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create(
-                                MINIO.getUserName(), MINIO.getPassword())))
+                                S3.getAccessKey(), S3.getSecretKey())))
                 .forcePathStyle(true)
                 .build()) {
             client.createBucket(b -> b.bucket(BUCKET));

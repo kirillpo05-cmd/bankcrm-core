@@ -22,10 +22,10 @@ modules. Identifiers in it (`CP-BR-03`, `IL-EC-07`, `RB-US-05`, …) are **stabl
 | Language / framework | Java 21, Spring Boot 3.x, Spring Security |
 | Database | PostgreSQL 16 — Flyway migrations in `db/migrations/` |
 | Messaging | Apache Kafka (KRaft), transactional outbox on the producer side |
-| Object storage | MinIO (S3 API) for interaction attachments |
+| Object storage | S3 API — LocalStack locally, a real bucket in a deployment |
 | Build | Maven wrapper (`./mvnw`) |
 | Test | JUnit 5, Testcontainers (real PostgreSQL + Kafka), REST Assured |
-| Local env | `docker compose up` — API + DB + broker + MinIO, one command |
+| Local env | `docker compose up` — API + DB + broker + object store, one command |
 
 ## Architecture
 
@@ -84,7 +84,7 @@ denormalized fields on Kafka events.
 Working today (no Java needed — `cp .env.example .env` first):
 
 ```bash
-docker compose up -d                     # Postgres + Kafka + MinIO + both Flyway runs
+docker compose up -d                     # Postgres + Kafka + S3 + all three Flyway runs
 docker compose --profile seed up seed    # 2 teams, 9 users
 docker compose logs flyway-client        # migration output
 docker compose down -v                   # reset everything, including data

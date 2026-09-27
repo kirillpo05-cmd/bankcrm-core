@@ -170,38 +170,51 @@ services:
 
   # --------------------------------------------------------------- MinIO
   # Object store for interaction attachments (SPEC.md §6.2.3).
-  minio:
-    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
-    container_name: client360-minio
-    command: server /data --console-address ":9001"
+  # Object storage for interaction attachments (IL-US-06), over the S3 API.
+  #
+  # LocalStack rather than MinIO, and not by preference: MinIO stopped publishing pullable images.
+  # docker.io/minio/minio and quay.io/minio/minio both answer 401/denied, so `docker compose up` on
+  # a fresh clone could not start and CI could not run the attachment tests. Chainguard publishes
+  # MinIO but only at :latest, and this file pins every other image for a reason — an unpinned
+  # dependency is a stack that breaks overnight without a commit.
+  #
+  # The application is unaffected: interaction-service speaks the S3 API through the AWS SDK rather
+  # than a MinIO client, precisely so the server behind it is a configuration choice. The endpoint
+  # moves and nothing else does.
+  s3:
+    image: localstack/localstack:3.8
+    container_name: client360-s3
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-client360}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-client360_local_only}
+      SERVICES: s3
+      # LocalStack's S3 accepts any credentials, but the services are configured with these so the
+      # local stack and a deployed one differ in the endpoint alone.
+      AWS_DEFAULT_REGION: us-east-1
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${S3_PORT:-4566}:4566"
     volumes:
-      - miniodata:/data
+      - s3data:/var/lib/localstack
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
 
-  minio-init:
-    image: minio/mc:RELEASE.2024-09-16T17-43-14Z
-    container_name: client360-minio-init
+  s3-init:
+    image: amazon/aws-cli:2.27.49
+    container_name: client360-s3-init
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-client360}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-client360_local_only}
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint: ["/bin/sh", "-c"]
     command: |
       "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-client360} ${MINIO_ROOT_PASSWORD:-client360_local_only}
-      mc mb --ignore-existing local/client360-attachments
-      mc version enable local/client360-attachments
-      mc anonymous set none local/client360-attachments
+      aws --endpoint-url http://s3:4566 s3api create-bucket --bucket client360-attachments 2>/dev/null || true
+      aws --endpoint-url http://s3:4566 s3api put-bucket-versioning --bucket client360-attachments           --versioning-configuration Status=Enabled
       echo 'bucket ready: client360-attachments'
       "
 
@@ -256,7 +269,7 @@ services:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy
-      minio:
+      s3:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: local
@@ -264,10 +277,10 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      CLIENT360_S3_ENDPOINT: http://minio:9000
+      CLIENT360_S3_ENDPOINT: http://s3:4566
       CLIENT360_S3_BUCKET: client360-attachments
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-client360}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-client360_local_only}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-client360}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-client360_local_only}
       CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
       CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
       CLIENT360_JWT_PUBLIC_KEY: ${CLIENT360_JWT_PUBLIC_KEY}
@@ -285,4 +298,4 @@ services:
 volumes:
   pgdata:
   kafkadata:
-  miniodata:
+  s3data:

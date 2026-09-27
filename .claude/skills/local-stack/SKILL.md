@@ -1,6 +1,6 @@
 ---
 name: local-stack
-description: Bring up, verify, reset and troubleshoot the Client360 local environment — Postgres, Kafka, MinIO, the Flyway runs, the seed profile and the application services. Use when starting work, when tests need a database, when migrations must be inspected, or when Docker, Testcontainers or the Maven wrapper misbehave on this machine.
+description: Bring up, verify, reset and troubleshoot the Client360 local environment — Postgres, Kafka, the S3 store, the Flyway runs, the seed profile and the application services. Use when starting work, when tests need a database, when migrations must be inspected, or when Docker, Testcontainers or the Maven wrapper misbehave on this machine.
 ---
 
 # Локальный стенд
@@ -9,7 +9,7 @@ description: Bring up, verify, reset and troubleshoot the Client360 local enviro
 
 ```bash
 cp .env.example .env          # .env git-ignored, значения только локальные
-docker compose up -d          # Postgres + Kafka + MinIO + обе миграции Flyway
+docker compose up -d          # Postgres + Kafka + S3 + все три миграции Flyway
 ```
 
 Дождись, пока Flyway отработает, и посмотри его вывод:
