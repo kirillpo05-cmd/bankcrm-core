@@ -23,6 +23,8 @@ import java.util.UUID;
  * @param hasCorrection set on an original that has been corrected, so the feed renders the pair
  *     together with this one visibly superseded (IL-BR-03)
  * @param edited the wording was changed inside the author's window (IL-BR-02)
+ * @param ticket the lifecycle block, {@code null} on every row that is not a ticket. It is what
+ *     puts the SLA badge and the `sla-breached` red border on a feed row (§6.3 S-IL-01)
  * @param deleted only ever true in an auditor's {@code includeDeleted} view, where the row is shown
  *     struck through with who removed it and why (§6.3)
  */
@@ -38,6 +40,7 @@ public record TimelineEntry(
         InteractionOutcome outcome,
         InteractionVisibility visibility,
         UserSummary author,
+        TicketView ticket,
         int attachmentCount,
         UUID correctsId,
         boolean hasCorrection,
@@ -48,7 +51,8 @@ public record TimelineEntry(
         UserSummary deletedBy,
         String deletionReason) {
 
-    public static TimelineEntry of(TimelineRow row, UserSummary author, UserSummary deletedBy, UUID viewerId) {
+    public static TimelineEntry of(
+            TimelineRow row, UserSummary author, UserSummary deletedBy, TicketView ticket, UUID viewerId) {
         Interaction interaction = row.interaction();
         return new TimelineEntry(
                 interaction.id(),
@@ -61,6 +65,7 @@ public record TimelineEntry(
                 interaction.outcome(),
                 interaction.visibility(),
                 author,
+                ticket,
                 row.attachmentCount(),
                 interaction.correctsId(),
                 row.hasCorrection(),

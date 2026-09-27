@@ -4,10 +4,13 @@ import com.client360.interaction.domain.InteractionDirection;
 import com.client360.interaction.domain.InteractionOutcome;
 import com.client360.interaction.domain.InteractionType;
 import com.client360.interaction.domain.InteractionVisibility;
+import com.client360.interaction.domain.TicketPriority;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
+import java.util.UUID;
 
 /**
  * {@code POST /clients/{clientId}/interactions} body (SPEC.md §6.3, IL-US-02).
@@ -27,7 +30,21 @@ public record CreateInteractionRequest(
         @NotNull Instant occurredAt,
         Integer durationSeconds,
         InteractionOutcome outcome,
-        InteractionVisibility visibility) {
+        InteractionVisibility visibility,
+        @Valid NewTicket ticket) {
+
+    /**
+     * The ticket block, required when {@code type} is {@code TICKET} and refused otherwise.
+     *
+     * <p>There is no {@code status}: a ticket always enters at {@code NEW}, or IL-BR-08's
+     * transitions would guard a machine callers could start anywhere in. There is no
+     * {@code slaDueAt} either — it is derived from {@code priority} in the owning team's business
+     * hours and frozen (IL-BR-07), and a caller-supplied deadline would be a caller-supplied SLA.
+     *
+     * @param assigneeId optional; an unassigned ticket sits in the team queue until someone takes
+     *     it, which is a real state and not an error
+     */
+    public record NewTicket(@NotNull TicketPriority priority, UUID assigneeId) {}
 
     /**
      * Column defaults, applied here so the response echoes what was stored. A note and a ticket are

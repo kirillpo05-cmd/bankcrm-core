@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -54,22 +55,57 @@ public class UserDirectoryClient {
         }
         List<UUID> distinct = ids.stream().distinct().toList();
         try {
-            List<UserSummary> found = rest.get()
+            List<DirectoryUser> found = rest.get()
                     .uri(uri -> uri.path("/api/v1/internal/users")
                             .queryParam("ids", distinct.toArray())
                             .build())
                     .header(HttpHeaders.AUTHORIZATION, bearer())
                     .retrieve()
-                    .body(new ParameterizedTypeReference<List<UserSummary>>() {});
+                    .body(new ParameterizedTypeReference<List<DirectoryUser>>() {});
             Map<UUID, UserSummary> byId = found == null
                     ? Map.of()
-                    : found.stream().collect(Collectors.toMap(UserSummary::id, Function.identity()));
+                    : found.stream().collect(Collectors.toMap(DirectoryUser::id, DirectoryUser::toSummary));
             return distinct.stream()
                     .collect(Collectors.toMap(
                             Function.identity(), id -> byId.getOrDefault(id, new UserSummary(id, null))));
         } catch (RestClientException e) {
             log.warn("user directory unavailable; rendering {} author(s) as ids", distinct.size());
             return distinct.stream().collect(Collectors.toMap(Function.identity(), id -> new UserSummary(id, null)));
+        }
+    }
+
+    /**
+     * The user's primary team, for the {@code TEAM} scope of the cross-client feed (IL-US-07).
+     *
+     * <p>Asked of client-service rather than read from the token: team membership changes, and a
+     * claim minted hours ago would scope a supervisor's feed to a team they may have left.
+     *
+     * @return empty when the directory is unreachable or the user has no team — the caller decides
+     *     what that means, and for a feed it means showing nothing rather than showing everything
+     */
+    public Optional<UUID> teamOf(UUID userId) {
+        try {
+            List<DirectoryUser> found = rest.get()
+                    .uri(uri -> uri.path("/api/v1/internal/users")
+                            .queryParam("ids", userId)
+                            .build())
+                    .header(HttpHeaders.AUTHORIZATION, bearer())
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<List<DirectoryUser>>() {});
+            return found == null || found.isEmpty()
+                    ? Optional.empty()
+                    : Optional.ofNullable(found.getFirst().teamId());
+        } catch (RestClientException e) {
+            log.warn("user directory unavailable while resolving a team");
+            return Optional.empty();
+        }
+    }
+
+    /** What {@code GET /internal/users} answers. Projected to {@link UserSummary} for responses. */
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    public record DirectoryUser(UUID id, String fullName, UUID teamId) {
+        UserSummary toSummary() {
+            return new UserSummary(id, fullName);
         }
     }
 

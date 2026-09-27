@@ -23,12 +23,25 @@ spring:
     open-in-view: false
   kafka:
     bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      # The denormalized ownership columns are rebuilt from the topic, so a fresh deployment
+      # reads what is still retained rather than starting blind (V6).
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
       properties:
         enable.idempotence: true
+
+spring.servlet.multipart:
+  # The service refuses >10 MB itself with ATTACHMENT_TOO_LARGE (§6.2.3 ck_att_size); this is the
+  # container's own backstop, set a little higher so the API's error is what a caller sees rather
+  # than Tomcat's.
+  max-file-size: 12MB
+  max-request-size: 12MB
 
 server:
   port: 8080
@@ -61,6 +74,15 @@ client360:
   client-service:
     base-url: ${CLIENT360_CLIENT_SERVICE_URL:http://localhost:8080}
     timeout: 2s
+  # Attachment storage (IL-US-06). MinIO locally, a real bucket in a deployed environment —
+  # the endpoint is the only difference, because both speak the S3 API.
+  s3:
+    endpoint: ${CLIENT360_S3_ENDPOINT:http://localhost:9000}
+    bucket: ${CLIENT360_S3_BUCKET:client360-attachments}
+    access-key: ${MINIO_ROOT_USER:client360}
+    secret-key: ${MINIO_ROOT_PASSWORD:client360_local_only}
+    # §6.3: long enough to follow a redirect, short enough that a copied link is already dead.
+    link-ttl: 60s
 
 logging:
   level:

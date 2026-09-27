@@ -12,9 +12,9 @@ import java.util.UUID;
  * author, and only inside the window below — after that the remedy is a correction, a new row with
  * {@code correctsId} set, never a rewrite (IL-BR-03).
  *
- * <p>The ticket subtype columns are not mapped yet. Nothing can create a {@code TICKET} until the
- * ticket endpoints of §6.3 land, so there is no row to read them from; they arrive with that work
- * rather than sitting here unused.
+ * <p>{@code ticket} is the subtype: non-null exactly when {@code type} is {@code TICKET}, which is
+ * what {@code ck_interactions_ticket_fields} enforces in the database. Only a ticket has a
+ * lifecycle; everything else in the feed is a fact that happened once.
  */
 public record Interaction(
         UUID id,
@@ -30,6 +30,7 @@ public record Interaction(
         InteractionSource source,
         String externalRef,
         UUID authorId,
+        Ticket ticket,
         UUID correctsId,
         Instant editedAt,
         int editCount,
@@ -100,5 +101,70 @@ public record Interaction(
 
     public boolean isDeleted() {
         return deletedAt != null;
+    }
+
+    public boolean isTicket() {
+        return type == InteractionType.TICKET;
+    }
+
+    /**
+     * The ticket lifecycle of §6.2.2 (IL-BR-07, IL-BR-08).
+     *
+     * @param slaDueAt derived from {@code priority} at creation and frozen, except that raising
+     *     priority recomputes it from the original {@code occurredAt} and leaving
+     *     {@code WAITING_CLIENT} shifts it forward by the business hours the pause consumed
+     * @param waitingSince when the current {@code WAITING_CLIENT} period began, {@code null}
+     *     otherwise — the pair is a database constraint, not a convention
+     * @param pausedSeconds business seconds given back across every pause so far. Reporting only:
+     *     {@code slaDueAt} already carries the same shift, which is what keeps "breached" a plain
+     *     comparison the queue index can serve
+     */
+    public record Ticket(
+            TicketStatus status,
+            TicketPriority priority,
+            UUID assigneeId,
+            Instant slaDueAt,
+            Instant resolvedAt,
+            Instant closedAt,
+            String resolutionNote,
+            Instant waitingSince,
+            long pausedSeconds) {
+
+        /**
+         * Whether the deadline was missed.
+         *
+         * <p>A resolved ticket is judged against when it was resolved, not against now — otherwise
+         * every ticket ever closed late would drift further into breach forever, and "how many did
+         * we miss" would depend on when you asked.
+         *
+         * <p>A paused ticket is never breached: the clock is not running, and {@code slaDueAt} has
+         * not yet been shifted for the pause in progress (that happens on leaving
+         * {@code WAITING_CLIENT}), so comparing against it mid-pause would report a breach the
+         * bank did not cause (IL-BR-08).
+         */
+        public boolean isBreached(Instant now) {
+            if (status.pausesSla()) {
+                return false;
+            }
+            return (resolvedAt != null ? resolvedAt : now).isAfter(slaDueAt);
+        }
+
+        /** IL-EC-10: past this a paused ticket is reported as stale rather than simply quiet. */
+        public static final Duration STALE_AFTER = Duration.ofDays(14);
+
+        /**
+         * IL-EC-10: a pause that has gone on too long.
+         *
+         * <p>The counterpart to {@link #isBreached}, and the reason it can safely answer
+         * {@code false} while paused. Waiting on a client is legitimate and stops the SLA; waiting
+         * for three weeks is not, and without this a ticket could be parked indefinitely with a
+         * clean SLA — a paused clock must not become a hiding place.
+         *
+         * <p>Calendar days, not business hours: the question is how long the client has been silent,
+         * and a client does not work office hours.
+         */
+        public boolean isStale(Instant now) {
+            return status.pausesSla() && waitingSince != null && waitingSince.isBefore(now.minus(STALE_AFTER));
+        }
     }
 }

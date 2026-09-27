@@ -26,6 +26,7 @@ import java.util.UUID;
  *     since chains are one level deep (IL-BR-05)
  * @param maskedCardNumbers how many card numbers the PAN detector redacted from the body before
  *     storing it, so the caller learns their text was changed (IL-EC-05)
+ * @param ticket the lifecycle block, {@code null} on everything that is not a {@code TICKET}
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record InteractionResponse(
@@ -41,7 +42,8 @@ public record InteractionResponse(
         InteractionVisibility visibility,
         InteractionSource source,
         UserSummary author,
-        List<Object> attachments,
+        TicketView ticket,
+        List<AttachmentView> attachments,
         UUID correctsId,
         List<CorrectionSummary> corrections,
         Instant editableUntil,
@@ -59,6 +61,8 @@ public record InteractionResponse(
             Interaction interaction,
             boolean withBody,
             UserSummary author,
+            TicketView ticket,
+            List<AttachmentView> attachments,
             List<CorrectionSummary> corrections,
             Integer maskedCardNumbers) {
         return new InteractionResponse(
@@ -74,9 +78,8 @@ public record InteractionResponse(
                 interaction.visibility(),
                 interaction.source(),
                 author,
-                // Attachments arrive with the attachment endpoints of §6.3; the field is present
-                // so the response shape does not change when they do.
-                List.of(),
+                ticket,
+                attachments,
                 interaction.correctsId(),
                 corrections,
                 interaction.editableUntil(),

@@ -4,6 +4,7 @@ import com.client360.common.outbox.ChangedFields;
 import com.client360.common.outbox.EventEnvelope;
 import com.client360.common.outbox.EventFactory;
 import com.client360.common.outbox.OutboxWriter;
+import com.client360.interaction.domain.Attachment;
 import com.client360.interaction.domain.Interaction;
 import java.util.UUID;
 import org.springframework.stereotype.Component;
@@ -74,6 +75,73 @@ public class InteractionEvents {
         append(
                 after.clientId(),
                 events.event("interaction.updated", ENTITY, after.id())
+                        .clientId(after.clientId())
+                        .action("UPDATE")
+                        .changes(changes)
+                        .build());
+    }
+
+    /**
+     * IL-US-06: a document was attached. Its own event rather than an {@code interaction.updated},
+     * because "what was attached to this record, and by whom" is a question an investigation asks
+     * directly.
+     *
+     * <p>The filename is masked. It is free text a manager typed or a scanner produced, and a name
+     * like {@code kowalska-passport.pdf} says as much about a client as the file does (AR-01). The
+     * checksum travels in the clear: it identifies the bytes without describing them, which is what
+     * makes it useful for proving a file was not swapped.
+     */
+    public void attachmentAdded(Interaction interaction, Attachment attachment) {
+        ChangedFields changes = ChangedFields.create()
+                .sensitive("filename", null, attachment.filename())
+                .put("contentType", null, attachment.contentType())
+                .put("sizeBytes", null, attachment.sizeBytes())
+                .put("scan", null, attachment.scan());
+        append(
+                interaction.clientId(),
+                events.event("interaction.attachment_added", ENTITY, interaction.id())
+                        .clientId(interaction.clientId())
+                        .action("CREATE")
+                        .changes(changes)
+                        .context("attachmentId", attachment.id())
+                        .build());
+    }
+
+    /** §6.3: the row is soft-deleted and the object stays, so the event is the record of removal. */
+    public void attachmentDeleted(Interaction interaction, Attachment attachment) {
+        append(
+                interaction.clientId(),
+                events.event("interaction.attachment_deleted", ENTITY, interaction.id())
+                        .clientId(interaction.clientId())
+                        .action("DELETE")
+                        .context("attachmentId", attachment.id())
+                        .build());
+    }
+
+    /**
+     * IL-BR-10: a ticket moved. Its own event type — {@code ticket.status_changed}, not
+     * {@code interaction.updated} — because "when did this ticket become breached, and who let it"
+     * is a question the SLA report and an audit both ask, and neither should have to sift ordinary
+     * edits for it.
+     *
+     * <p>Nothing here is masked: a status, a priority, an assignee and a deadline are operational
+     * facts about the bank's own handling, not anything about the client (AR-01). The resolution
+     * note is the exception — it is free text a manager wrote and may quote the client, so the
+     * event proves it changed and never what it says.
+     */
+    public void ticketChanged(Interaction before, Interaction after) {
+        Interaction.Ticket was = before.ticket();
+        Interaction.Ticket now = after.ticket();
+        ChangedFields changes = ChangedFields.create()
+                .put("ticketStatus", was.status(), now.status())
+                .put("ticketPriority", was.priority(), now.priority())
+                .put("ticketAssigneeId", was.assigneeId(), now.assigneeId())
+                .put("slaDueAt", was.slaDueAt(), now.slaDueAt())
+                .put("slaPausedSeconds", was.pausedSeconds(), now.pausedSeconds())
+                .sensitive("resolutionNote", was.resolutionNote(), now.resolutionNote());
+        append(
+                after.clientId(),
+                events.event("ticket.status_changed", ENTITY, after.id())
                         .clientId(after.clientId())
                         .action("UPDATE")
                         .changes(changes)

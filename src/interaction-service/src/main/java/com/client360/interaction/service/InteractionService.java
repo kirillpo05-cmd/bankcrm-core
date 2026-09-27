@@ -4,21 +4,30 @@ import static com.client360.common.security.Permissions.AUDIT_READ;
 import static com.client360.common.security.Permissions.INTERACTION_DELETE;
 import static com.client360.common.security.Permissions.INTERACTION_READ;
 import static com.client360.common.security.Permissions.INTERACTION_WRITE;
+import static com.client360.common.security.Permissions.TICKET_READ;
+import static com.client360.common.security.Permissions.TICKET_WRITE;
 
 import com.client360.common.api.ApiException;
 import com.client360.common.api.ErrorCodes;
 import com.client360.common.id.UuidV7;
 import com.client360.common.security.AccessPolicy;
 import com.client360.common.security.CurrentUser;
+import com.client360.common.security.Scope;
 import com.client360.common.time.DatabaseClock;
 import com.client360.common.web.Cursor;
 import com.client360.common.web.KeysetPage;
+import com.client360.interaction.api.AttachmentView;
 import com.client360.interaction.api.CreateCorrectionRequest;
 import com.client360.interaction.api.CreateInteractionRequest;
+import com.client360.interaction.api.FeedFilter;
 import com.client360.interaction.api.InteractionEdit;
 import com.client360.interaction.api.InteractionErrorCodes;
 import com.client360.interaction.api.InteractionResponse;
 import com.client360.interaction.api.InteractionResponse.CorrectionSummary;
+import com.client360.interaction.api.TicketFilter;
+import com.client360.interaction.api.TicketPatch;
+import com.client360.interaction.api.TicketQueueEntry;
+import com.client360.interaction.api.TicketView;
 import com.client360.interaction.api.TimelineEntry;
 import com.client360.interaction.api.TimelineFilter;
 import com.client360.interaction.api.UserSummary;
@@ -30,11 +39,20 @@ import com.client360.interaction.domain.InteractionDirection;
 import com.client360.interaction.domain.InteractionOutcome;
 import com.client360.interaction.domain.InteractionSource;
 import com.client360.interaction.domain.InteractionType;
+import com.client360.interaction.domain.TicketPriority;
+import com.client360.interaction.domain.TicketStatus;
+import com.client360.interaction.persistence.AttachmentRepository;
 import com.client360.interaction.persistence.InteractionRepository;
+import com.client360.interaction.persistence.InteractionRepository.FeedQuery;
 import com.client360.interaction.persistence.InteractionRepository.NewInteraction;
+import com.client360.interaction.persistence.InteractionRepository.NewTicket;
+import com.client360.interaction.persistence.InteractionRepository.TicketQuery;
+import com.client360.interaction.persistence.InteractionRepository.TicketUpdate;
 import com.client360.interaction.persistence.InteractionRepository.TimelineQuery;
 import com.client360.interaction.persistence.InteractionRepository.TimelineRow;
+import com.client360.interaction.support.BusinessHours;
 import com.client360.interaction.support.PanMasker;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -57,6 +75,7 @@ public class InteractionService {
     private final ClientAccessClient clientAccess;
     private final UserDirectoryClient directory;
     private final InteractionEvents events;
+    private final AttachmentRepository attachmentRepository;
     private final AccessPolicy accessPolicy;
     private final DatabaseClock clock;
 
@@ -65,12 +84,14 @@ public class InteractionService {
             ClientAccessClient clientAccess,
             UserDirectoryClient directory,
             InteractionEvents events,
+            AttachmentRepository attachmentRepository,
             AccessPolicy accessPolicy,
             DatabaseClock clock) {
         this.interactions = interactions;
         this.clientAccess = clientAccess;
         this.directory = directory;
         this.events = events;
+        this.attachmentRepository = attachmentRepository;
         this.accessPolicy = accessPolicy;
         this.clock = clock;
     }
@@ -105,6 +126,9 @@ public class InteractionService {
                 InteractionSource.WEB,
                 null,
                 caller.id(),
+                client.ownerManagerId(),
+                client.teamId(),
+                ticketDraft(request, client),
                 null));
 
         events.created(created);
@@ -112,6 +136,9 @@ public class InteractionService {
                 created,
                 true,
                 authorOf(created.authorId(), caller),
+                ticketViewOf(created),
+                // Nothing can be attached to an interaction that did not exist a moment ago.
+                List.of(),
                 List.of(),
                 masked.maskedAnything() ? masked.maskedCount() : null);
     }
@@ -163,8 +190,16 @@ public class InteractionService {
             if (row.interaction().deletedBy() != null) {
                 people.add(row.interaction().deletedBy());
             }
+            // Assignees join the same batch: a queue of fifty tickets must not be fifty calls to
+            // the user directory, and the client already deduplicates.
+            if (row.interaction().ticket() != null && row.interaction().ticket().assigneeId() != null) {
+                people.add(row.interaction().ticket().assigneeId());
+            }
         });
         Map<UUID, UserSummary> names = directory.byIds(people);
+        // One clock read for the whole page. slaBreached is computed per row against it, so every
+        // row on a page is judged against the same instant rather than a drifting one.
+        Instant now = clock.now();
 
         List<TimelineEntry> content = page.stream()
                 .map(row -> TimelineEntry.of(
@@ -173,6 +208,7 @@ public class InteractionService {
                         row.interaction().deletedBy() == null
                                 ? null
                                 : author(names, row.interaction().deletedBy()),
+                        ticketViewOf(row.interaction(), names, now),
                         caller.id()))
                 .toList();
         Interaction last = page.isEmpty() ? null : page.getLast().interaction();
@@ -200,7 +236,15 @@ public class InteractionService {
         boolean withBody = interaction.canReadBodyAs(caller.id());
         events.readSensitive(interaction, withBody ? "interaction.body" : "interaction.private_metadata");
         return InteractionResponse.of(
-                interaction, withBody, directory.byId(interaction.authorId()), correctionsOf(interaction), null);
+                interaction,
+                withBody,
+                directory.byId(interaction.authorId()),
+                ticketViewOf(interaction),
+                // Only the detail lists them. A timeline row carries attachmentCount instead, so a
+                // feed of fifty rows is not fifty listings of files nobody opened (IL-BR-11).
+                attachmentsOf(interaction.id()),
+                correctionsOf(interaction),
+                null);
     }
 
     // ------------------------------------------------------------------- delete
@@ -293,7 +337,13 @@ public class InteractionService {
         // Nothing changed, so nothing is written: no edit counted against IL-BR-04's cap, no event.
         if (subject.equals(current.subject()) && masked.body().equals(current.body())) {
             return InteractionResponse.of(
-                    current, true, authorOf(current.authorId(), caller), correctionsOf(current), null);
+                    current,
+                    true,
+                    authorOf(current.authorId(), caller),
+                    ticketViewOf(current),
+                    attachmentsOf(current.id()),
+                    correctionsOf(current),
+                    null);
         }
 
         Interaction saved = interactions
@@ -309,6 +359,8 @@ public class InteractionService {
                 saved,
                 true,
                 authorOf(saved.authorId(), caller),
+                ticketViewOf(saved),
+                attachmentsOf(saved.id()),
                 correctionsOf(saved),
                 masked.maskedAnything() ? masked.maskedCount() : null);
     }
@@ -331,7 +383,9 @@ public class InteractionService {
     @Transactional
     public InteractionResponse correct(UUID originalId, CreateCorrectionRequest request, CurrentUser caller) {
         Interaction original = interactions.findById(originalId).orElseThrow(InteractionService::notFound);
-        clientAccess.require(original.clientId(), INTERACTION_WRITE);
+        // Kept rather than discarded: the correction is stamped with the client's current owner
+        // and team from this same answer, so it lands scoped exactly as a fresh interaction does.
+        ClientAccessView client = clientAccess.require(original.clientId(), INTERACTION_WRITE);
         if (!original.isVisibleTo(caller.id(), isAdmin(caller))) {
             events.recordDenial(original.clientId(), originalId, INTERACTION_WRITE);
             throw notFound();
@@ -362,12 +416,19 @@ public class InteractionService {
                 InteractionSource.WEB,
                 null,
                 caller.id(),
+                client.ownerManagerId(),
+                client.teamId(),
+                // A correction is a NOTE, never a ticket: correcting the wording of a ticket must
+                // not fork its lifecycle into a second SLA clock (IL-BR-03).
+                null,
                 original.id()));
         events.corrected(correction, original);
         return InteractionResponse.of(
                 correction,
                 true,
                 authorOf(correction.authorId(), caller),
+                ticketViewOf(correction),
+                List.of(),
                 List.of(),
                 masked.maskedAnything() ? masked.maskedCount() : null);
     }
@@ -436,8 +497,394 @@ public class InteractionService {
                                 current,
                                 current.canReadBodyAs(caller.id()),
                                 authorOf(current.authorId(), caller),
+                                ticketViewOf(current),
+                                attachmentsOf(current.id()),
                                 correctionsOf(current),
                                 null)));
+    }
+
+    /**
+     * {@code GET /interactions} (§6.3, IL-US-07) — the supervisor's cross-client coaching feed.
+     *
+     * <p>Answerable at all only because V6 denormalized the owning team onto each row. The scope
+     * decides the team, never the caller: at {@code TEAM} the feed is the caller's own team,
+     * resolved from client-service because membership changes and a token claim would not; at
+     * {@code ALL} an explicit {@code teamId} narrows it and its absence means everyone.
+     *
+     * <p>{@code OWN} is refused outright. A manager's own clients are their timelines, one at a
+     * time; there is nothing a cross-client feed would add for them but a list of the same rows.
+     *
+     * <p>IL-BR-09: {@code PRIVATE} interactions are excluded for everybody here — the author and
+     * an admin included. That is stricter than the per-client timeline, deliberately.
+     */
+    @Transactional(readOnly = true)
+    public KeysetPage<TimelineEntry> feed(FeedFilter filter, String cursor, Integer limit, CurrentUser caller) {
+        Scope scope = accessPolicy
+                .scopeOf(caller, INTERACTION_READ)
+                .orElseThrow(() -> ApiException.forbidden(
+                                ErrorCodes.PERMISSION_DENIED, "This action requires the interaction:read permission.")
+                        .detail("permission", INTERACTION_READ));
+
+        UUID teamId;
+        if (scope == Scope.ALL) {
+            teamId = filter.teamId();
+        } else if (scope == Scope.TEAM) {
+            UUID own = directory
+                    .teamOf(caller.id())
+                    .orElseThrow(() -> ApiException.forbidden(
+                            ErrorCodes.PERMISSION_DENIED,
+                            "Your team could not be resolved, so this feed cannot be scoped."));
+            if (filter.teamId() != null && !filter.teamId().equals(own)) {
+                // Naming someone else's team is not a smaller request, it is a different one.
+                throw ApiException.forbidden(ErrorCodes.PERMISSION_DENIED, "This feed is limited to your own team.")
+                        .detail("teamId", own);
+            }
+            teamId = own;
+        } else {
+            throw ApiException.forbidden(
+                            ErrorCodes.PERMISSION_DENIED,
+                            "The cross-client feed needs interaction:read at TEAM or ALL scope.")
+                    .detail("permission", INTERACTION_READ, "scope", scope);
+        }
+
+        int pageSize = requireLimit(limit);
+        List<TimelineRow> rows = interactions.crossClientFeed(
+                new FeedQuery(
+                        teamId,
+                        filter.clientId(),
+                        filter.authorId(),
+                        filter.types(),
+                        filter.from(),
+                        filter.to(),
+                        Cursor.decode(cursor)),
+                pageSize + 1);
+
+        boolean hasMore = rows.size() > pageSize;
+        List<TimelineRow> page = hasMore ? rows.subList(0, pageSize) : rows;
+        Map<UUID, UserSummary> names = directory.byIds(
+                page.stream().map(row -> row.interaction().authorId()).toList());
+        Instant now = clock.now();
+
+        List<TimelineEntry> content = page.stream()
+                .map(row -> TimelineEntry.of(
+                        row,
+                        author(names, row.interaction().authorId()),
+                        null,
+                        ticketViewOf(row.interaction(), names, now),
+                        caller.id()))
+                .toList();
+        Interaction last = page.isEmpty() ? null : page.getLast().interaction();
+        String nextCursor = hasMore && last != null ? new Cursor(last.occurredAt(), last.id()).encode() : null;
+        return new KeysetPage<>(content, nextCursor, hasMore);
+    }
+
+    /**
+     * {@code GET /tickets} (§6.3, IL-US-05) — the ticket queue, most urgent first.
+     *
+     * <p><strong>What this serves and what it does not.</strong> A queue by assignee is
+     * authorizable here: the tickets are the caller's own, or an admin is asking. A queue across a
+     * supervisor's whole team is not, and the gap is structural rather than an omission. This
+     * service holds no client table, so "every ticket on a client my team owns" cannot be answered
+     * without either the owner and team denormalized onto {@code interactions} — the "denormalized
+     * fields on Kafka events" path, which needs a {@code client.events} consumer that does not
+     * exist yet — or a per-query round trip for a client-id set with no bound on its size. The
+     * spec's own index, {@code (ticket_assignee_id, sla_due_at)}, is built for the assignee queue
+     * and would not serve a team scan either.
+     *
+     * <p>What a supervisor can do today is ask for one client's tickets, which
+     * {@link ClientAccessClient} authorizes per client exactly as every other read does.
+     */
+    @Transactional(readOnly = true)
+    public KeysetPage<TicketQueueEntry> tickets(TicketFilter filter, String cursor, Integer limit, CurrentUser caller) {
+        Scope scope = accessPolicy
+                .scopeOf(caller, TICKET_READ)
+                .orElseThrow(() -> ApiException.forbidden(
+                                ErrorCodes.PERMISSION_DENIED, "This action requires the ticket:read permission.")
+                        .detail("permission", TICKET_READ));
+
+        if (filter.clientId() != null) {
+            // One client's queue is one client's authorization question, and ER-01 shapes the
+            // answer: a client outside the caller's scope is 404 here as everywhere else.
+            clientAccess.require(filter.clientId(), TICKET_READ);
+        }
+
+        UUID assigneeId = filter.assigneeId();
+        UUID teamId = null;
+        if (filter.clientId() == null) {
+            // V6 made the team's queue answerable: the rows carry the owning team, so a supervisor
+            // can be scoped to their own clients without this service holding a client table.
+            if (scope == Scope.TEAM) {
+                teamId = directory
+                        .teamOf(caller.id())
+                        .orElseThrow(() -> ApiException.forbidden(
+                                ErrorCodes.PERMISSION_DENIED,
+                                "Your team could not be resolved, so this queue cannot be scoped."));
+            } else if (scope == Scope.OWN && assigneeId == null) {
+                // "My open tickets" — the tickets on the caller's own desk.
+                assigneeId = caller.id();
+            }
+            if (scope == Scope.OWN && !caller.id().equals(assigneeId)) {
+                // Nothing narrows an OWN caller to a colleague's desk, so the honest answer is no.
+                throw ApiException.forbidden(
+                                ErrorCodes.PERMISSION_DENIED,
+                                "Reading another user's ticket queue requires ticket:read beyond OWN scope.")
+                        .detail("permission", TICKET_READ, "assigneeId", assigneeId);
+            }
+        }
+
+        int pageSize = requireLimit(limit);
+        List<Interaction> rows = interactions.ticketQueue(
+                new TicketQuery(
+                        assigneeId,
+                        filter.clientId(),
+                        teamId,
+                        filter.statuses(),
+                        filter.priority(),
+                        filter.slaBreached(),
+                        filter.stale(),
+                        Cursor.decode(cursor),
+                        caller.id(),
+                        isAdmin(caller)),
+                pageSize + 1);
+
+        boolean hasMore = rows.size() > pageSize;
+        List<Interaction> page = hasMore ? rows.subList(0, pageSize) : rows;
+        List<UUID> people = new java.util.ArrayList<>();
+        page.forEach(row -> {
+            people.add(row.authorId());
+            if (row.ticket().assigneeId() != null) {
+                people.add(row.ticket().assigneeId());
+            }
+        });
+        Map<UUID, UserSummary> names = directory.byIds(people);
+        Instant now = clock.now();
+
+        List<TicketQueueEntry> content = page.stream()
+                .map(row -> TicketQueueEntry.of(row, author(names, row.authorId()), ticketViewOf(row, names, now)))
+                .toList();
+        Interaction last = page.isEmpty() ? null : page.getLast();
+        // Keyed on the deadline, because that is what the page is ordered by. A cursor built from
+        // occurredAt would page a list sorted by something else and silently skip rows.
+        String nextCursor = hasMore && last != null ? new Cursor(last.ticket().slaDueAt(), last.id()).encode() : null;
+        return new KeysetPage<>(content, nextCursor, hasMore);
+    }
+
+    /**
+     * {@code PATCH /interactions/{id}/ticket} (IL-US-05) — a ticket transition.
+     *
+     * <p>No {@code If-Match}, and §6.3 lists no version conflict for this endpoint. The state
+     * machine is its own guard where it matters: two callers both moving {@code NEW → IN_PROGRESS}
+     * mean the second one finds the ticket already there and is refused by IL-BR-08, which is a
+     * better answer than a stale-version error about a field neither of them touched.
+     */
+    @Transactional
+    public InteractionResponse patchTicket(UUID id, TicketPatch patch, CurrentUser caller) {
+        if (patch == null || patch.isEmpty()) {
+            throw ApiException.validation("ticket", "at least one field must be present");
+        }
+        Interaction current = interactions.findById(id).orElseThrow(InteractionService::notFound);
+        if (!current.isTicket()) {
+            // Not a 422: saying "that exists but is a NOTE" about a row the caller has not been
+            // authorized for would answer a question they never earned (ER-01).
+            throw notFound();
+        }
+        ClientAccessView client = clientAccess.require(current.clientId(), TICKET_WRITE);
+        if (!current.isVisibleTo(caller.id(), isAdmin(caller))) {
+            events.recordDenial(current.clientId(), id, TICKET_WRITE);
+            throw notFound();
+        }
+
+        Interaction.Ticket ticket = current.ticket();
+        boolean supervises = supervisesTickets(caller);
+        requireTicketActor(ticket, client, caller, supervises);
+
+        TicketStatus target = patch.status() == null ? ticket.status() : patch.status();
+        if (target != ticket.status() && !ticket.status().canMoveTo(target)) {
+            throw ApiException.conflict(
+                            InteractionErrorCodes.ILLEGAL_STATE_TRANSITION,
+                            "A " + ticket.status() + " ticket cannot move to " + target + " (IL-BR-08).")
+                    .detail(
+                            "from",
+                            ticket.status(),
+                            "to",
+                            target,
+                            "legalTargets",
+                            ticket.status().legalTargets());
+        }
+
+        String resolutionNote = patch.resolutionNote() == null ? ticket.resolutionNote() : patch.resolutionNote();
+        if (target.requiresResolutionNote() && (resolutionNote == null || resolutionNote.isBlank())) {
+            throw ApiException.businessRule("Moving to " + target + " requires a resolution note.")
+                    .detail("field", "resolutionNote", "issue", "required for " + target);
+        }
+
+        TicketPriority priority = patch.priority() == null ? ticket.priority() : patch.priority();
+        if (priority == TicketPriority.CRITICAL && ticket.priority() != TicketPriority.CRITICAL && !supervises) {
+            // §6.3 words this as "without the supervisor role". Asked here as permission + scope
+            // (CLAUDE.md rule 5): holding ticket:write beyond your own clients is what supervising
+            // means, and the check keeps working when v2 replaces roles with real grants.
+            throw ApiException.businessRule("Raising a ticket to CRITICAL is a supervisor's decision.")
+                    .detail("field", "priority", "issue", "requires ticket:write beyond OWN scope");
+        }
+
+        Instant now = clock.now();
+        return applyTransition(current, patch, target, priority, resolutionNote, client, now, caller);
+    }
+
+    /**
+     * Where IL-BR-07 and IL-BR-08 actually happen: the deadline moves, or it does not, and the
+     * pause is accounted for. Kept separate from the checks above so the rules are readable without
+     * the validation around them.
+     */
+    private InteractionResponse applyTransition(
+            Interaction current,
+            TicketPatch patch,
+            TicketStatus target,
+            TicketPriority priority,
+            String resolutionNote,
+            ClientAccessView client,
+            Instant now,
+            CurrentUser caller) {
+        Interaction.Ticket ticket = current.ticket();
+        Instant slaDueAt = ticket.slaDueAt();
+        long pausedSeconds = ticket.pausedSeconds();
+        Instant waitingSince = ticket.waitingSince();
+
+        // IL-BR-08: leaving WAITING_CLIENT gives back exactly the business hours the pause cost —
+        // a ticket parked over a weekend gets nothing, because nobody was working it either way.
+        if (ticket.status().pausesSla() && !target.pausesSla()) {
+            long paused =
+                    BusinessHours.between(waitingSince, now, client.zone()).toSeconds();
+            slaDueAt = slaDueAt.plusSeconds(paused);
+            pausedSeconds += paused;
+            waitingSince = null;
+        } else if (!ticket.status().pausesSla() && target.pausesSla()) {
+            waitingSince = now;
+        }
+
+        // IL-BR-07: a raise recomputes from the original occurredAt, which may put the deadline in
+        // the past — intentionally (IL-EC-09). Lowering priority does not, or a ticket could buy
+        // time by being de-escalated. The pause already granted is carried across, because it was
+        // earned by the client's silence and an escalation does not take it back.
+        if (priority.isHigherThan(ticket.priority())) {
+            slaDueAt = BusinessHours.plus(current.occurredAt(), priority.sla(), client.zone())
+                    .plusSeconds(pausedSeconds);
+        }
+
+        // ck_interactions_ticket_resolved_at: the timestamp and the status agree or the row is
+        // refused. Reopening a RESOLVED ticket therefore clears it rather than leaving a resolution
+        // date on a ticket that is open again.
+        Instant resolvedAt =
+                target.isResolvedOrClosed() ? (ticket.resolvedAt() == null ? now : ticket.resolvedAt()) : null;
+        Instant closedAt = target == TicketStatus.CLOSED ? (ticket.closedAt() == null ? now : ticket.closedAt()) : null;
+
+        Interaction saved = interactions.updateTicket(
+                current.id(),
+                new TicketUpdate(
+                        target,
+                        priority,
+                        patch.assigneeId() == null ? ticket.assigneeId() : patch.assigneeId(),
+                        slaDueAt,
+                        resolvedAt,
+                        closedAt,
+                        resolutionNote,
+                        waitingSince,
+                        pausedSeconds));
+
+        events.ticketChanged(current, saved);
+        return InteractionResponse.of(
+                saved,
+                saved.canReadBodyAs(caller.id()),
+                authorOf(saved.authorId(), caller),
+                ticketViewOf(saved),
+                attachmentsOf(saved.id()),
+                correctionsOf(saved),
+                null);
+    }
+
+    /**
+     * §6.3: the assignee, the client's owner, or a supervisor over either.
+     *
+     * <p>{@code clientAccess.require} has already settled whether the caller may touch this client
+     * at all. This is the narrower question of who owns the work — a manager holding
+     * {@code ticket:write} over their own clients may not reassign a colleague's ticket just
+     * because it happens to sit on a client they share.
+     */
+    private void requireTicketActor(
+            Interaction.Ticket ticket, ClientAccessView client, CurrentUser caller, boolean supervises) {
+        boolean isAssignee = caller.id().equals(ticket.assigneeId());
+        boolean isOwner = caller.id().equals(client.ownerManagerId());
+        if (!isAssignee && !isOwner && !supervises) {
+            throw ApiException.forbidden(
+                            ErrorCodes.PERMISSION_DENIED,
+                            "Only the assignee, the client's owner or their supervisor may change this ticket.")
+                    .detail("permission", TICKET_WRITE);
+        }
+    }
+
+    /** Holding {@code ticket:write} past your own clients is what §6.3 calls supervising. */
+    private boolean supervisesTickets(CurrentUser caller) {
+        return accessPolicy
+                .scopeOf(caller, TICKET_WRITE)
+                .filter(scope -> scope != Scope.OWN)
+                .isPresent();
+    }
+
+    /**
+     * The ticket block for a single response, or {@code null} on anything that is not a ticket.
+     *
+     * <p>Reads the clock once, here, because {@code slaBreached} is computed and not stored
+     * (TR-BR-02's reasoning applies to an SLA as much as to an overdue task). The timeline builds
+     * its rows from one captured instant instead of calling this per row — a feed of fifty tickets
+     * must not be fifty {@code SELECT now()}.
+     */
+    private TicketView ticketViewOf(Interaction interaction) {
+        if (interaction.ticket() == null) {
+            return null;
+        }
+        return TicketView.of(interaction.ticket(), assigneeOf(interaction.ticket()), clock.now());
+    }
+
+    private List<AttachmentView> attachmentsOf(UUID interactionId) {
+        return attachmentRepository.listFor(interactionId).stream()
+                .map(AttachmentView::of)
+                .toList();
+    }
+
+    private UserSummary assigneeOf(Interaction.Ticket ticket) {
+        return ticket.assigneeId() == null ? null : directory.byId(ticket.assigneeId());
+    }
+
+    /** The timeline's variant: names already batched, clock already read. */
+    private static TicketView ticketViewOf(Interaction interaction, Map<UUID, UserSummary> names, Instant now) {
+        Interaction.Ticket ticket = interaction.ticket();
+        if (ticket == null) {
+            return null;
+        }
+        UserSummary assignee = ticket.assigneeId() == null ? null : names.get(ticket.assigneeId());
+        return TicketView.of(ticket, assignee, now);
+    }
+
+    /**
+     * IL-BR-07: the deadline is derived from priority at creation and frozen.
+     *
+     * <p>Measured in the owning team's business hours, so {@code HIGH} is twenty-four working
+     * hours rather than one calendar day, and a ticket raised on Friday evening does not spend its
+     * SLA over a weekend nobody was working. The zone comes from client-service on the
+     * authorization answer this method's caller already has — asking again would be a second hop
+     * for one string.
+     *
+     * <p>The clock starts at {@code occurredAt}, not at now: a ticket raised from a call that
+     * happened this morning is already partly through its SLA, and starting it at insert time
+     * would quietly hand back the hours that passed while it was being written up.
+     */
+    private NewTicket ticketDraft(CreateInteractionRequest request, ClientAccessView client) {
+        if (request.ticket() == null) {
+            return null;
+        }
+        TicketPriority priority = request.ticket().priority();
+        Instant slaDueAt = BusinessHours.plus(request.occurredAt(), priority.sla(), client.zone());
+        return new NewTicket(priority, request.ticket().assigneeId(), slaDueAt);
     }
 
     private void validate(CreateInteractionRequest request, ClientAccessView client) {
@@ -447,11 +894,13 @@ public class InteractionService {
             throw ApiException.businessRule("A closed client accepts only NOTE interactions (CP-BR-08).")
                     .detail("field", "type", "issue", "client is CLOSED");
         }
-        if (request.type() == InteractionType.TICKET) {
-            // Honest refusal rather than a half-written ticket: sla_due_at is derived from priority
-            // at creation and frozen (IL-BR-07), and that belongs with the ticket endpoints.
-            throw ApiException.businessRule("Tickets are created through the ticket endpoints of §6.3.")
-                    .detail("field", "type", "issue", "TICKET is not yet supported here");
+        // ck_interactions_ticket_fields makes the block and the type inseparable; saying so here
+        // names the field instead of surfacing a constraint (CLAUDE.md rule 9, both edges).
+        if (request.type() == InteractionType.TICKET && request.ticket() == null) {
+            throw ApiException.validation("ticket", "required when type is TICKET");
+        }
+        if (request.type() != InteractionType.TICKET && request.ticket() != null) {
+            throw ApiException.validation("ticket", "only a TICKET carries a ticket block");
         }
         if (request.durationSeconds() != null && !request.type().allowsDuration()) {
             throw ApiException.validation("durationSeconds", "only a CALL or a MEETING has a duration");
@@ -468,6 +917,11 @@ public class InteractionService {
             throw ApiException.businessRule("occurredAt may be at most 5 minutes ahead of server time.")
                     .detail("field", "occurredAt", "issue", "too far in the future");
         }
+    }
+
+    /** IL-BR-09's admin, for callers outside this class that need the same question answered. */
+    public boolean callerIsAdmin(CurrentUser caller) {
+        return isAdmin(caller);
     }
 
     /**
@@ -489,7 +943,7 @@ public class InteractionService {
         return limit;
     }
 
-    private static ApiException notFound() {
+    static ApiException notFound() {
         return ApiException.notFound(
                 InteractionErrorCodes.INTERACTION_NOT_FOUND, "Interaction not found or not visible to you.");
     }

@@ -95,6 +95,7 @@ public abstract class AbstractInteractionIntegrationTest {
         jdbc.sql("DELETE FROM interaction.interactions").update();
         jdbc.sql("DELETE FROM interaction.outbox_events").update();
         jdbc.sql("DELETE FROM interaction.idempotency_keys").update();
+        jdbc.sql("DELETE FROM interaction.rate_limit_counters").update();
         seedClientSchema();
     }
 
@@ -214,10 +215,20 @@ public abstract class AbstractInteractionIntegrationTest {
             java.util.Set<String> auditorAll = java.util.Set.of(
                     com.client360.common.security.Permissions.INTERACTION_READ,
                     com.client360.common.security.Permissions.AUDIT_READ,
-                    com.client360.common.security.Permissions.CLIENT_READ);
+                    com.client360.common.security.Permissions.CLIENT_READ,
+                    com.client360.common.security.Permissions.TICKET_READ);
+            java.util.Set<String> managerOwn = java.util.Set.of(
+                    com.client360.common.security.Permissions.INTERACTION_READ,
+                    com.client360.common.security.Permissions.INTERACTION_WRITE,
+                    com.client360.common.security.Permissions.TICKET_READ,
+                    com.client360.common.security.Permissions.TICKET_WRITE);
             java.util.Set<String> supervisorTeamExtra = java.util.Set.of(
                     com.client360.common.security.Permissions.INTERACTION_DELETE,
-                    com.client360.common.security.Permissions.AUDIT_READ);
+                    com.client360.common.security.Permissions.AUDIT_READ,
+                    com.client360.common.security.Permissions.TICKET_READ,
+                    com.client360.common.security.Permissions.TICKET_WRITE,
+                    com.client360.common.security.Permissions.INTERACTION_READ,
+                    com.client360.common.security.Permissions.INTERACTION_WRITE);
             return (user, permission) -> {
                 if (user.roles().contains("ADMIN")) {
                     return java.util.Optional.of(com.client360.common.security.Scope.ALL);
@@ -229,6 +240,14 @@ public abstract class AbstractInteractionIntegrationTest {
                 }
                 if (user.roles().contains("SUPERVISOR") && supervisorTeamExtra.contains(permission)) {
                     return java.util.Optional.of(com.client360.common.security.Scope.TEAM);
+                }
+                // Everything §9.2.8 gives a MANAGER at OWN. MvpAccessPolicy would hand back ALL
+                // for all of them, and then every caller in every test would be a supervisor —
+                // which is exactly the distinction §6.3 draws for the cross-client feed and for
+                // raising a ticket to CRITICAL. Listed rather than inferred, because getting this
+                // wrong makes a permission test pass for the wrong reason.
+                if (managerOwn.contains(permission)) {
+                    return java.util.Optional.of(com.client360.common.security.Scope.OWN);
                 }
                 return manager.scopeOf(user, permission);
             };
@@ -247,7 +266,8 @@ public abstract class AbstractInteractionIntegrationTest {
                         throw com.client360.common.api.ApiException.notFound(
                                 "CLIENT_NOT_FOUND", "Client not found or not in your scope.");
                     }
-                    return new ClientAccessView(clientId, ADAM_NOWAK, TEAM_RWN, clientStatus, "NOT_STARTED");
+                    return new ClientAccessView(
+                            clientId, ADAM_NOWAK, TEAM_RWN, clientStatus, "NOT_STARTED", "Europe/Warsaw");
                 }
             };
         }
@@ -269,6 +289,16 @@ public abstract class AbstractInteractionIntegrationTest {
                 @Override
                 public UserSummary byId(UUID id) {
                     return new UserSummary(id, name(id));
+                }
+
+                /**
+                 * Everyone seeded here is on RWN, which is also the team the doubled
+                 * client-service reports for the client — so a supervisor's feed and the rows in
+                 * it agree, and a test that widens the scope has to say so explicitly.
+                 */
+                @Override
+                public java.util.Optional<UUID> teamOf(UUID userId) {
+                    return java.util.Optional.of(TEAM_RWN);
                 }
 
                 private String name(UUID id) {
