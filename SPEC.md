@@ -350,6 +350,35 @@ Every mutable aggregate root carries `version INTEGER NOT NULL DEFAULT 0` (JPA `
 | `POST /audit/exports` per user | 5 per hour |
 | Attachment upload per user | 20 per hour, 10 MB each |
 
+Over a limit is `429 RATE_LIMIT_EXCEEDED` with `Retry-After` in seconds and the limit, window and
+wait in `details`, so a UI can render the §4.11 `rate-limited` countdown without guessing.
+
+**Counted in the database, not in the process.** A per-instance counter multiplies by the number of
+replicas: two instances behind a load balancer would pass 120 lookups a minute through a limit of
+60 and still report the limit as enforced. The stack has no Redis, so the shared store is the
+database the service is already connected to (`rate_limit_counters`, client-service V7 and
+interaction-service V7 — one per schema, the same arrangement as `idempotency_keys`). Both of the
+limits built so far are low-volume and security-relevant, where one upsert per request costs
+nothing; the blanket 300/min across all endpoints is not built, because a write on every request
+is the wrong shape for it.
+
+**Fixed windows, not sliding.** A burst of up to 2× the limit is possible across a window boundary.
+Accepted deliberately: it bounds sustained probing, which is the threat, where a sliding window
+would mean storing a timestamp per request instead of a count per window. The window is floored
+from `now()` in PostgreSQL, never a JVM clock, so replicas agree on where a window starts.
+
+**Counted outside the caller's transaction.** The limiter commits its own count, so a request that
+ends in an error still costs the caller an attempt — otherwise a prober could reset their quota by
+making every attempt fail, which is the shape enumeration actually takes.
+
+| Limit | State |
+|---|---|
+| `GET /clients/lookup` per user | built — the PII-enumeration guard of §5.3 |
+| Attachment upload per user | built — the rate half of the limit; the size half is `ck_att_size` |
+| Per user, all endpoints | not built (see above) |
+| `POST /auth/login` per IP and per account | v2, with auth (§11.1) |
+| `POST /audit/exports` per user | v2, with audit-service |
+
 ### 4.11 UI state vocabulary
 
 Every screen in this spec declares its states using one shared vocabulary, so the frontend can implement them as a single generic wrapper component.
@@ -882,17 +911,56 @@ not change when it starts being true.
 ```json
 {
   "survivor": { "…": "full client representation" },
-  "moved": { "interactions": 12, "tasks": 3, "products": 2 },
-  "skipped": { "products": 1 },
+  "moved": { "products": 2 },
+  "skipped": { "products": ["ACC-88213"] },
+  "pending": ["interactions"],
   "mergedId": "77cd…"
 }
 ```
+
+`moved` counts only what client-service re-pointed in the same transaction as the merge.
+**Interactions are not counted, they are named in `pending`**: they belong to interaction-service,
+no transaction spans both services, and a number this service does not have would be a number it
+made up. They follow the `client.merged` event, whose `context` carries the survivor's owner and
+team so the consumer can re-point and re-scope them in one statement without calling back. Until it
+catches up, the loser's history is still reachable — the `410` carries a `Location` to the
+survivor. Tasks are v3 (§11.1), so there is nothing of theirs to wait for yet.
 
 | Status | Code | Cause |
 |---|---|---|
 | `403` | `ROLE_REQUIRED` | Caller is not an admin |
 | `409` | `ILLEGAL_STATE_TRANSITION` | Either record is already merged, or the two are already in the same merge chain |
-| `422` | `BUSINESS_RULE_VIOLATED` | `survivorId == mergedId`; either client has an `ACTIVE` product of the same `external_product_id`; `reason` under 20 characters |
+| `422` | `BUSINESS_RULE_VIOLATED` | `survivorId == mergedId`; **both** clients hold an `ACTIVE` product with the same `external_product_id` |
+| `400` | `VALIDATION_FAILED` | `reason` under 20 characters |
+
+**The product rule, reconciled.** This table and CP-BR-10 appear to disagree — one refuses on a
+duplicate `external_product_id`, the other skips it. They are about different duplicates, and both
+are right:
+
+- **Both records hold it `ACTIVE`** → `422`. Two live accounts sharing one core-banking id is
+  broken data upstream, and a merge that quietly hid one would make it harder to find, not easier.
+- **Anything else** (one closed, one suspended, either pending) → the product is skipped and named
+  in `skipped`. A duplicate record of a closed account is exactly the debris deduplication exists
+  to clear.
+
+**Already merged is `409`, not `410`.** Every *read* of a merged id is a `410` with a `Location`
+(CP-BR-10), but a merge is a write whose precondition failed. Answering it with a redirect would
+invite a client to follow it and merge again, which is the one thing the check is there to stop.
+
+**Order inside the transaction.** The loser is marked merged — which soft-deletes it — before the
+survivor adopts any of its fields. Email and tax ID are unique among non-deleted clients
+(CP-BR-02), so handing the survivor the loser's email while the loser still holds it would collide
+with the very index that makes duplicates findable in the first place.
+
+**`fieldResolution` covers contact fields only**: `EMAIL`, `PHONE`, `TAX_ID`, `ADDRESS`,
+`DATE_OF_BIRTH`, `MIDDLE_NAME`, and the survivor keeps its own when a field is absent — the safe
+outcome is the default and the other one has to be asked for. Identity, ownership, KYC and status
+are not resolvable: `externalRef` is immutable (CP-BR-01) and the rest each have their own path,
+which a deduplication must not become a back door into.
+
+**`Idempotency-Key` is required.** A merge is irreversible (Q-08), so a retried request has to
+return the first answer rather than attempt a second merge whose loser has already stopped being a
+record.
 
 ---
 
@@ -922,6 +990,14 @@ added when the service exists.
 | `POST` | `/clients/{id}/products` | `product:write` (admin / sync service account) | `Idempotency-Key` required; `201`; `409 PRODUCT_DUPLICATE_EXTERNAL_ID`; `422` when the client is not cleared for new products (CP-BR-07) |
 | `PATCH` | `/clients/{id}/products/{productId}` | `product:write` | `If-Match` required; `409 VERSION_CONFLICT` with `details[0].current`, `404 PRODUCT_NOT_FOUND`, `422` on closing a product with a non-zero balance |
 | `POST` | `/clients/{id}/products/sync` | `product:sync` | `202 Accepted`; pulls fresh state from core banking; `503 DEPENDENCY_UNAVAILABLE` when the core is down |
+
+**`POST /products/sync` is not built, deliberately.** There is no core banking system to pull from,
+so the endpoint's only reachable answer would be the `503` it already promises for an unavailable
+core — an endpoint that cannot succeed, with a seam whose shape would be guessed from nothing. The
+read side of CP-US-07 is complete and does not depend on it: products are a read-only projection,
+and `syncedAt`, `syncAgeMinutes` and `stale` already tell the card how old the data is, which is the
+part that keeps a manager from quoting a two-day-old balance (S-CP-04). What is missing is a core to
+talk to, not code.
 
 ---
 
@@ -1462,6 +1538,50 @@ reason travels in the `interaction.deleted` event's `context`.
 
 #### Ticket lifecycle
 
+##### Raising one
+
+A ticket is created through `POST /clients/{clientId}/interactions` with `type: "TICKET"` and a
+`ticket` block, not through an endpoint of its own — it is an interaction with a lifecycle, and it
+belongs on the same timeline as the call it came out of.
+
+```json
+{ "type": "TICKET", "subject": "Card declined abroad", "body": "Declines in Italy.",
+  "occurredAt": "2026-09-05T08:02:00.000Z",
+  "ticket": { "priority": "HIGH", "assigneeId": "5b7e…" } }
+```
+
+The block is required when `type` is `TICKET` and refused otherwise, mirroring
+`ck_interactions_ticket_fields`; either way it is `400 VALIDATION_FAILED` naming `ticket`.
+
+- **`status` is not a field.** Every ticket enters at `NEW`, or IL-BR-08's transitions would guard
+  a machine callers could start anywhere in.
+- **`slaDueAt` is not a field.** It is derived from `priority` (IL-BR-07) and frozen. A
+  caller-supplied deadline is a caller-supplied SLA.
+- **The clock starts at `occurredAt`, not at insert time.** A ticket raised from a call that
+  happened this morning is already partly through its SLA; starting it when the manager finished
+  typing would quietly return the hours spent writing it up.
+- `assigneeId` is optional. An unassigned ticket sits in the team queue, which is a state and not
+  an error.
+
+A correction of a ticket (IL-BR-03) is a `NOTE`. Forking the lifecycle would give one issue two SLA
+clocks with nothing to say which one the bank is judged against.
+
+##### The `ticket` block in a response
+
+`null` on everything that is not a ticket — present with a null value, not absent, so a client can
+render the feed without special-casing the key. On a ticket it carries the fields shown in the
+timeline example above plus `resolvedAt`, `closedAt`, `resolutionNote`, `waitingSince`,
+`slaPausedSeconds` and `legalTargets`.
+
+`slaBreached` and `legalTargets` are **computed, never stored**: `now()` is not `IMMUTABLE`, so a
+breach column would be stale the moment it was written (the same reasoning as TR-BR-02 on overdue),
+and `legalTargets` is sent so the UI disables illegal moves from the server's own table rather than
+a copy that drifts. The service still validates every transition — a disabled button is a
+convenience, not a control.
+
+`slaPausedSeconds` is present so a supervisor reading a deadline can see it was moved and by how
+much, instead of wondering why it is later than the priority implies.
+
 ##### `PATCH /interactions/{id}/ticket`
 
 **Permission:** `ticket:write` — assignee, the client's owner, or a supervisor over either
@@ -1477,6 +1597,39 @@ reason travels in the `interaction.deleted` event's `context`.
 | `403` | `PERMISSION_DENIED` | Caller is neither assignee, owner, nor supervising either |
 | `409` | `ILLEGAL_STATE_TRANSITION` | e.g. `CLOSED → IN_PROGRESS`; `details` lists the legal targets |
 | `422` | `BUSINESS_RULE_VIOLATED` | `RESOLVED`/`REJECTED` without `resolutionNote`; raising priority to `CRITICAL` without the supervisor role |
+| `400` | `VALIDATION_FAILED` | An empty patch — nothing to do is a malformed request, not a no-op |
+| `404` | `INTERACTION_NOT_FOUND` | Absent, deleted, out of scope, **or not a ticket** |
+
+**No `If-Match`.** Unlike `PATCH /interactions/{id}`, a transition is not an edit of the fields the
+caller was looking at, and the state machine already guards what matters: two callers both moving
+`NEW → IN_PROGRESS` means the second finds the ticket already there and is refused by IL-BR-08 —
+a better answer than a stale-version error about a field neither of them touched.
+
+**A patch field left out, or sent as `null`, leaves the ticket alone.** There is nothing here worth
+clearing: a ticket always has a status and a priority, and this version defines no way to un-assign
+one. When it gains one, `assigneeId` needs the three-state treatment a merge-patch requires, and a
+two-state body cannot be stretched to cover it.
+
+**"Without the supervisor role" is asked as permission + scope**, never as a role string (CLAUDE.md
+rule 5): holding `ticket:write` beyond `OWN` is what supervising means here, so the check keeps
+working when v2 replaces the seeded roles with real grants.
+
+**Patching a non-ticket is `404`, not `422`.** Answering "that exists, but it is a NOTE" would tell
+a caller something about a row they were never authorized for (ER-01).
+
+**What a transition does to the deadline:**
+
+- **Leaving `WAITING_CLIENT`** adds the *business* hours the pause consumed to both `sla_due_at` and
+  `sla_paused_seconds`. A ticket parked over a weekend gets nothing back, because nobody was
+  working it either way. The deadline is shifted rather than subtracted at read time, which keeps
+  "breached" a plain comparison against `now()` that `ix_int_ticket_queue` can serve.
+- **Raising priority** recomputes from the original `occurred_at` (IL-BR-07), carrying across any
+  pause already granted — that time was earned by the client's silence and an escalation does not
+  take it back. **Lowering priority changes nothing**, or a ticket could buy time by being
+  de-escalated.
+- **Reopening a `RESOLVED` ticket clears `resolved_at`**, because
+  `ck_interactions_ticket_resolved_at` ties the timestamp to the status and a ticket that is open
+  again has no resolution date.
 
 ##### `GET /tickets`
 
@@ -1484,6 +1637,43 @@ reason travels in the `interaction.deleted` event's `context`.
 **Query:** `assigneeId`, `status` (repeatable), `priority`, `slaBreached=true`, `clientId`, `cursor`, `limit`
 
 Powers the "my open tickets" queue and the supervisor's SLA view.
+
+Keyset-paginated on `sla_due_at` ascending — soonest deadline first, matching `ix_int_ticket_queue`.
+The cursor is built from the deadline, not `occurred_at`: a cursor keyed on something other than
+the sort order pages a list it is not sorted by and silently skips rows. Rows carry `clientId`
+(a queue crosses clients, so a row that does not say whose it is cannot be acted on) and no
+`bodyPreview` — a worklist is for choosing what to open, and previewing fifty bodies to open one
+would be fifty reads.
+
+**With no `status` the queue is open work.** `CLOSED` and `REJECTED` are history, which is also why
+the index excludes them; ask for them explicitly to see them.
+
+**Scope.**
+
+| Query | Authorized by |
+|---|---|
+| neither `assigneeId` nor `clientId`, caller at `OWN` | the caller's own desk |
+| caller at `TEAM` | every ticket on a client the caller's team owns, via the denormalized `client_team_id` |
+| `assigneeId` = someone else, caller at `OWN` | refused — nothing narrows an `OWN` caller to a colleague's desk |
+| `clientId` | per client, through the same internal access check as every other read; out of scope is `404` (ER-01) |
+
+The team view is served by `client_team_id`, denormalized onto `interactions` and kept current by
+the `client.events` consumer. Before that column existed this query could not be answered at all:
+interaction-service holds no client table, and the alternative was a per-query round trip for an
+unbounded set of client ids. A `TEAM` caller is always constrained to their own team, resolved from
+client-service rather than from a token claim, because membership changes and a claim minted hours
+ago would scope a supervisor to a team they may have left.
+
+`stale=true` is IL-EC-10: paused on the client for more than 14 **calendar** days — the question is
+how long the client has been silent, and a client does not keep office hours. It is the counterpart
+to `slaBreached`, and the reason a paused ticket can safely report `slaBreached: false`: waiting is
+legitimate and stops the clock, waiting three weeks is not. Without it `WAITING_CLIENT` would be a
+way to park a ticket indefinitely with a clean SLA. Both are computed per row and also returned as
+`ticket.stale` and `ticket.slaBreached`, so a filter and a badge cannot disagree.
+
+`slaBreached=true` applies the same rule as the computed `slaBreached` field — a paused clock is
+never late (IL-BR-08), and a resolved ticket is judged against when it was resolved — so the
+filter and the row badge cannot disagree.
 
 ---
 
@@ -1495,6 +1685,38 @@ Powers the "my open tickets" queue and the supervisor's SLA view.
 | `GET` | `/interactions/{id}/attachments/{attachmentId}` | `302` to a 60-second pre-signed object-store URL. `409 ATTACHMENT_SCAN_PENDING` while `PENDING`; `403 ATTACHMENT_INFECTED` when `INFECTED`. Emits `READ_SENSITIVE` |
 | `DELETE` | `/interactions/{id}/attachments/{attachmentId}` | Author within the edit window, or admin. `204` |
 
+**Bytes never pass through this service.** An upload goes straight to the bucket; a download is a
+`302` to a pre-signed link the browser follows itself. Streaming a 10 MB file back through a request
+thread would hold one for the length of somebody's connection and put customer documents in this
+service's heap for no reason. The redirect carries `Cache-Control: no-store`, so a signed URL does
+not linger in a shared cache after it stops being the caller's.
+
+**The listing carries no URL.** Attachments appear on `GET /interactions/{id}` as metadata only —
+filename, type, size, `scan`, checksum. A link exists only as the answer to a download request, and
+that request is what audits the disclosure. Putting a link in the listing would hand out every file
+on the interaction to anyone who merely opened it (IL-BR-11). The timeline carries `attachmentCount`
+and no listing at all, for the same reason.
+
+**Order of writes.** The object is written first and the row is what makes it real. If the insert
+fails the object is removed again; if that removal also fails, an unreferenced object is left in the
+bucket, which is a cleanup job's problem and never a caller's. Row-first would leave a row pointing
+at nothing — a broken download for a file the UI says exists.
+
+**No `Idempotency-Key`.** §4.6 asks for one where repetition would duplicate a record. Two uploads
+of the same document are two attachments, which is what a manager who pressed the button twice
+actually did, and the five-file limit is what stops it running away.
+
+**The storage key is derived from identifiers, never from the filename** — a caller-supplied name
+would otherwise choose a path inside the bucket. The filename is kept for the download's
+`Content-Disposition` and is masked in the event (AR-01): `kowalska-passport.pdf` says as much
+about a client as the file does.
+
+**Nothing scans yet.** No scanner is wired, so every upload stays `PENDING` and every download
+answers `409 ATTACHMENT_SCAN_PENDING`. That is deliberate and visible rather than hidden: serving
+unscanned bytes because a scanner has not been built would be the wrong default in a bank, and the
+API says plainly which of the two is true. `FAILED` is treated as `PENDING` — a file that could not
+be scanned is not a file that passed.
+
 ---
 
 #### `GET /interactions` — cross-client feed (IL-US-07)
@@ -1502,7 +1724,28 @@ Powers the "my open tickets" queue and the supervisor's SLA view.
 **Permission:** `interaction:read` scope `TEAM` or `ALL`
 **Query:** `teamId`, `authorId`, `clientId`, `type`, `from`, `to`, `cursor`, `limit`
 
-Supervisor coaching view. `PRIVATE` interactions are excluded regardless of scope (IL-BR-09).
+Supervisor coaching view. `PRIVATE` interactions are excluded regardless of scope (IL-BR-09) — and
+that means everyone, the note's own author and an admin included. Stricter than the per-client
+timeline, deliberately: a coaching view is not where private notes are read.
+
+**`OWN` is refused.** A manager's own clients are their timelines, one at a time; a cross-client
+feed would add nothing but the same rows in one list.
+
+**The scope decides the team, not the parameter.** At `TEAM` the feed is the caller's own team and
+naming another is `403` — a different request, not a narrower one. At `ALL` a `teamId` narrows it
+and its absence means everyone. The caller's team is resolved from client-service on each request
+rather than read from the token, because membership changes and a stale claim would scope a
+supervisor to a team they may have left.
+
+**How it is answerable at all.** `client_owner_id` and `client_team_id` are denormalized onto
+`interactions` (migration V6) — stamped at write time from the authorization answer the write
+already fetched, and rewritten by the `client.events` consumer when a client changes hands
+(CP-US-05). Without them this service, which owns no client table, could only have asked
+client-service for an unbounded list of client ids on every page of every feed.
+
+They are filter data, in the same sense as CP-BR-11's counters on the client card: **no
+authorization decision may read them.** A decision still asks client-service. So a message the
+consumer misses costs a filter that is behind, never a permission that is wrong.
 
 ### 6.4 Business logic rules
 
@@ -2234,7 +2477,21 @@ CREATE TRIGGER trg_audit_log_no_update BEFORE UPDATE OR DELETE OR TRUNCATE
     ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION audit_log_immutable();
 ```
 
-The trigger must be re-applied to each new partition; the partition-creation job does this as part of the same transaction that creates the partition.
+**The trigger is needed in both places, and the DDL above is only half of it.** A statement-level
+trigger fires for the table the statement names. One on the partitioned parent catches
+`UPDATE audit_log SET …`; one on a partition catches a statement aimed at that partition directly.
+Neither covers the other — statement triggers are not inherited by partitions. A schema carrying
+only the parent's trigger looks protected while any statement naming a partition goes through in
+silence, which is how this was first written here and what the schema test caught.
+
+The per-partition trigger is created by `audit.create_audit_partition()`, in the same transaction
+as the partition itself, so a partition cannot exist unarmed (AT-EC-13).
+
+**One naming casualty.** PostgreSQL implements a unique index on a partitioned parent as one index
+per partition, each with a generated name, so `ux_audit_event` never appears in a violation —
+`audit_log_2026_09_occurred_at_event_id_idx` does. The "name every constraint so a production error
+is readable" rule of `db-migrations.md` cannot hold for these two, and the idempotent-ingestion path
+has to recognise a redelivery by the key columns instead.
 
 #### 8.2.4 Hash chain
 
@@ -2297,12 +2554,17 @@ CREATE TABLE audit_consumer_state (
     last_offset      BIGINT      NOT NULL,
     last_event_at    TIMESTAMPTZ NOT NULL,
     last_processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    lag_seconds      INTEGER     GENERATED ALWAYS AS (0) STORED,  -- placeholder; computed at read time
     PRIMARY KEY (topic, partition_no)
 );
 ```
 
-Lag is reported by the health endpoint as `now() - last_event_at`, computed on read; the stored column exists only to keep the row shape stable for tooling.
+Lag is reported by the health endpoint as `now() - last_event_at`, computed on read.
+
+**`lag_seconds` was dropped from this table.** It was specified as
+`GENERATED ALWAYS AS (0) STORED` with a comment calling it a placeholder — a column that is always
+zero, never written and never read. A field like that is not neutral: it will eventually be
+mistaken for the answer by something that does not read the comment beside it. The reader computes
+lag from `last_event_at`, which is the only source of it.
 
 ### 8.3 API endpoints
 
