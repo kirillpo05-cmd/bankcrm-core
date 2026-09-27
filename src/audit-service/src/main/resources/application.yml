@@ -1,0 +1,52 @@
+# audit-service. Values come from the environment in every deployment; the defaults
+# here are the local compose stack (docker-compose.yml, .env.example).
+spring:
+  application:
+    name: audit-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/client360?currentSchema=audit,public}
+    username: ${SPRING_DATASOURCE_USERNAME:client360}
+    password: ${SPRING_DATASOURCE_PASSWORD:client360_local_only}
+    hikari:
+      pool-name: audit-service
+      maximum-pool-size: 20
+  flyway:
+    locations: classpath:db/migration
+    schemas: audit
+    default-schema: audit
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      # The log is rebuilt from the topic on a fresh deployment, so it reads what is retained
+      # rather than starting blank.
+      auto-offset-reset: earliest
+      # Offsets are committed by this service only after the row is stored, so at-least-once
+      # delivery becomes exactly-once storage via ux_audit_event (AT-BR-03).
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+server:
+  port: 8080
+  error:
+    whitelabel:
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.client360: INFO

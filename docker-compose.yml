@@ -73,6 +73,23 @@ services:
       -connectRetries=15
       migrate
 
+  flyway-audit:
+    image: flyway/flyway:10-alpine
+    container_name: client360-flyway-audit
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations/audit-service:/flyway/sql:ro
+    command: >
+      -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}
+      -user=${POSTGRES_USER:-client360}
+      -password=${POSTGRES_PASSWORD:-client360_local_only}
+      -schemas=audit
+      -defaultSchema=audit
+      -connectRetries=15
+      migrate
+
   # ------------------------------------------------------------ Seed (opt-in)
   seed:
     image: postgres:16-alpine
@@ -249,6 +266,8 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       CLIENT360_S3_ENDPOINT: http://minio:9000
       CLIENT360_S3_BUCKET: client360-attachments
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-client360}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-client360_local_only}
       CLIENT360_CRYPTO_DEV_KEY: ${CLIENT360_CRYPTO_DEV_KEY}
       CLIENT360_CRYPTO_DEV_PEPPER: ${CLIENT360_CRYPTO_DEV_PEPPER}
       CLIENT360_JWT_PUBLIC_KEY: ${CLIENT360_JWT_PUBLIC_KEY}

@@ -19,25 +19,37 @@
     <name>Client360</name>
     <description>Banking CRM: one auditable view of a customer (SPEC.md).</description>
 
-    <!--
-      audit-service joins the reactor with v2 (SPEC.md §11.1). Until then it has no
-      buildable sources, and listing it here would only produce an empty jar.
-    -->
     <modules>
         <module>src/common</module>
         <module>src/client-service</module>
         <module>src/interaction-service</module>
+        <!-- v2 (SPEC.md §11.1). The schema and its append-only guarantees land first; the
+             consumer, hash chain and query API follow. -->
+        <module>src/audit-service</module>
     </modules>
 
     <properties>
         <java.version>21</java.version>
         <libphonenumber.version>9.0.39</libphonenumber.version>
+        <!--
+          Attachments go to MinIO through the S3 API (CLAUDE.md → Stack). The AWS SDK rather than
+          MinIO's own client precisely because the interface is S3: the same code addresses MinIO
+          locally and a real bucket in production, with only an endpoint override between them.
+        -->
+        <awssdk.version>2.55.5</awssdk.version>
         <spotless.version>3.10.2</spotless.version>
         <palantir-java-format.version>2.98.0</palantir-java-format.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${awssdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>com.client360</groupId>
                 <artifactId>client360-common</artifactId>
