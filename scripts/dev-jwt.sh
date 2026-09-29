@@ -37,8 +37,11 @@ cmd_keys() {
     # SecurityConfig strips the PEM armour and all whitespace, so the key travels as one line and
     # needs no volume mount or multi-line env var.
     echo >&2
-    echo "Add this line to .env:" >&2
+    echo "Add these lines to .env:" >&2
     echo "CLIENT360_JWT_PUBLIC_KEY=$(grep -v -- '-----' "$PUB" | tr -d '\n')"
+    # client-service signs with this one. POST /auth/login makes the service the issuer, so
+    # it needs the private half; the other two services must never be given it.
+    echo "CLIENT360_JWT_PRIVATE_KEY=$(grep -v -- '-----' "$KEY" | tr -d '\n')"
 }
 
 cmd_token() {

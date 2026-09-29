@@ -2,6 +2,7 @@ package com.client360.client.service;
 
 import com.client360.client.api.ClientErrorCodes;
 import com.client360.client.domain.Client;
+import com.client360.client.persistence.TeamRepository;
 import com.client360.client.persistence.UserRepository;
 import com.client360.common.api.ApiException;
 import com.client360.common.api.ErrorCodes;
@@ -31,10 +32,12 @@ public class ClientAccess {
 
     private final AccessPolicy accessPolicy;
     private final UserRepository users;
+    private final TeamRepository teams;
 
-    public ClientAccess(AccessPolicy accessPolicy, UserRepository users) {
+    public ClientAccess(AccessPolicy accessPolicy, UserRepository users, TeamRepository teams) {
         this.accessPolicy = accessPolicy;
         this.users = users;
+        this.teams = teams;
     }
 
     /**
@@ -58,15 +61,16 @@ public class ClientAccess {
     /**
      * Whether {@code scope} covers this particular client (RB-BR-02).
      *
-     * <p>{@code TEAM} resolves against the caller's {@code primary_team_id}, the only membership
-     * the MVP schema records. v2 widens it to {@code team_members} plus supervised teams; because
-     * every caller asks through this one method, that is a change here and nowhere else.
+     * <p>{@code TEAM} is every team the caller supervises or is an active member of, plus their
+     * primary one. It used to be {@code primary_team_id} alone, the only membership the MVP schema
+     * recorded; V8's {@code team_members} widened it, and because every caller asks through this one
+     * method that was a change here and nowhere else.
      */
     public boolean covers(Scope scope, Client client, CurrentUser caller) {
         return switch (scope) {
             case ALL -> true;
             case TEAM ->
-                callerTeam(caller).map(team -> team.equals(client.teamId())).orElse(false);
+                client.teamId() != null && teams.scopeTeamsOf(caller.id()).contains(client.teamId());
             case OWN -> caller.id().equals(client.ownerManagerId());
         };
     }

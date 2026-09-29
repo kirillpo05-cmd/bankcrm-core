@@ -60,6 +60,20 @@ client360:
       public-key: ${CLIENT360_JWT_PUBLIC_KEY:}
       public-key-location: ${CLIENT360_JWT_PUBLIC_KEY_LOCATION:}
       issuer: ${CLIENT360_JWT_ISSUER:}
+    # The signing half, bound by this service alone: it is the authorization authority, so it is
+    # the only service that issues tokens (SPEC.md §9.3). A separate prefix from `jwt` above so a
+    # copied environment file cannot hand a private key to a service that only verifies.
+    issuer:
+      private-key: ${CLIENT360_JWT_PRIVATE_KEY:}
+      private-key-location: ${CLIENT360_JWT_PRIVATE_KEY_LOCATION:}
+      issuer: ${CLIENT360_JWT_ISSUER:}
+      # RB-BR-05. The ceiling is enforced in IssuerProperties, not just documented here.
+      access-token-ttl: ${CLIENT360_ACCESS_TOKEN_TTL:15m}
+      refresh-token-ttl: ${CLIENT360_REFRESH_TOKEN_TTL:8h}
+    password:
+      # RB-BR-12. Lowered only by the test suite, which would otherwise spend its time on key
+      # stretching; nothing in any deployed configuration sets it.
+      bcrypt-cost: ${CLIENT360_BCRYPT_COST:12}
   interaction-service:
     # Read by GET /clients/{id}/summary only, for the timeline panel of the card.
     base-url: ${CLIENT360_INTERACTION_SERVICE_URL:http://localhost:8081}

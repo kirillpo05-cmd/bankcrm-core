@@ -43,6 +43,7 @@ public class EventFactory {
         private ChangedFields changes = ChangedFields.create();
         private final Map<String, Object> context = new LinkedHashMap<>();
         private UUID correlationId;
+        private Actor explicitActor;
 
         private Builder(String eventType, String entityType, UUID entityId) {
             this.eventType = eventType;
@@ -74,6 +75,28 @@ public class EventFactory {
             return this;
         }
 
+        /**
+         * The actor, for the events emitted before a security context exists.
+         *
+         * <p>Login is the only case: the request that creates a session carries no token, so there
+         * is nobody on the thread to read, and {@code audit_log} accepts a null {@code actor_id}
+         * for {@code LOGIN_FAILURE} alone (§8.2.2). The ip and user agent still come from the
+         * request — those are facts about the call, not about the caller.
+         *
+         * @param role the role recorded as {@code actor.role}; {@code null} when the subject holds
+         *     none, which a failed login against an unknown address always does
+         */
+        public Builder actor(UUID id, String email, String role) {
+            RequestMetadata request = RequestMetadata.current().orElse(null);
+            this.explicitActor = new Actor(
+                    id,
+                    email,
+                    role,
+                    request == null ? null : request.ip(),
+                    request == null ? null : request.userAgent());
+            return this;
+        }
+
         /** Shared by every per-entity event of one bulk operation (AT-EC-11). Defaults to the request id. */
         public Builder correlationId(UUID correlationId) {
             this.correlationId = correlationId;
@@ -86,14 +109,17 @@ public class EventFactory {
             }
             CurrentUser user = CurrentUsers.find().orElse(null);
             RequestMetadata request = RequestMetadata.current().orElse(null);
-            Actor actor = user == null
-                    ? null
-                    : new Actor(
-                            user.id(),
-                            user.email(),
-                            user.primaryRole(),
-                            request == null ? null : request.ip(),
-                            request == null ? null : request.userAgent());
+            Actor actor = explicitActor;
+            if (actor == null) {
+                actor = user == null
+                        ? null
+                        : new Actor(
+                                user.id(),
+                                user.email(),
+                                user.primaryRole(),
+                                request == null ? null : request.ip(),
+                                request == null ? null : request.userAgent());
+            }
             UUID requestId =
                     request == null || request.requestId() == null ? null : UUID.fromString(request.requestId());
             Map<String, Object> fullContext = new LinkedHashMap<>();

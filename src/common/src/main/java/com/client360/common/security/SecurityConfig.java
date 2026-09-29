@@ -12,6 +12,7 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.security.SecurityProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -51,20 +52,32 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class SecurityConfig implements WebMvcConfigurer {
 
     @Bean
-    SecurityFilterChain apiSecurity(HttpSecurity http, AuthErrorHandlers authErrors) throws Exception {
+    SecurityFilterChain apiSecurity(
+            HttpSecurity http, AuthErrorHandlers authErrors, ObjectProvider<PublicEndpoints> publicEndpoints)
+            throws Exception {
+        String[] publicPaths = publicEndpoints.stream()
+                .flatMap(contribution -> contribution.paths().stream())
+                .toArray(String[]::new);
         http.csrf(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
                 .formLogin(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info")
-                        .permitAll()
-                        .requestMatchers("/error")
-                        .permitAll()
-                        .anyRequest()
-                        .authenticated())
+                .authorizeHttpRequests(authorize -> {
+                    authorize
+                            .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info")
+                            .permitAll()
+                            .requestMatchers("/error")
+                            .permitAll();
+                    // Token issuance cannot itself require a token. Contributed per service, and
+                    // only client-service contributes any (SPEC.md §9.3); the empty case is the
+                    // normal one and must not register a matcher that matches everything.
+                    if (publicPaths.length > 0) {
+                        authorize.requestMatchers(publicPaths).permitAll();
+                    }
+                    authorize.anyRequest().authenticated();
+                })
                 .oauth2ResourceServer(resourceServer -> resourceServer
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(
                                 token -> new JwtAuthenticationToken(token, List.of(), token.getSubject())))
