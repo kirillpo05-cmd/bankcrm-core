@@ -58,6 +58,8 @@ class AuditLogSchemaTest {
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.kafka.bootstrap-servers", () -> "localhost:1");
+        // SecurityConfig refuses to start without a verification key, and rightly so.
+        registry.add("client360.security.jwt.public-key", TestKeys::publicKeyPem);
     }
 
     @Nested
