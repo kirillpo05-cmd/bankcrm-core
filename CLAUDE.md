@@ -94,16 +94,17 @@ The services themselves (`client-service` on 8080, `interaction-service` on 8081
 `audit-service` joins in v2):
 
 ```bash
-scripts/dev-jwt.sh keys                  # once: RSA keypair -> paste the line into .env
+scripts/dev-jwt.sh keys                  # once: RSA keypair -> paste both lines into .env
 docker compose --profile app up -d --build
-scripts/dev-jwt.sh token <user-uuid> MANAGER   # a token to call the API with
-./mvnw -pl src/client-service test       # one service's tests
+./mvnw -pl src/client-service -am test   # one service's tests (-am: common is a snapshot)
 ./mvnw verify                            # full build + Testcontainers integration tests
 ./mvnw spotless:apply                    # format before committing (CI gates on spotless:check)
 ```
 
-Nothing issues tokens until `POST /auth/login` arrives with RBAC in v2, so `dev-jwt.sh` stands
-in for the issuer. Its private key lives in `.dev/`, which is git-ignored.
+`POST /api/v1/auth/login` issues the tokens; the seeded users' password is `local-dev-only`.
+client-service holds both halves of the keypair because it is the only issuer — never give the
+private half to another service. `scripts/dev-jwt.sh token` still mints one by hand for debugging
+a request without a session. The private key lives in `.dev/`, which is git-ignored.
 
 Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATHCONV=1`.
 

@@ -20,9 +20,9 @@ compliance as it happens, not reconstructed afterwards.
 | Module | Phase | State |
 |---|---|---|
 | **Client Profile** — customer card, KYC, products, ownership | MVP | Built |
-| **Interaction Log** — timeline of calls, notes, corrections | MVP | Timeline, editing and corrections built; tickets and attachments in progress |
-| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Events are already produced through the outbox; the consumer is not built |
-| **RBAC** — permission + scope, break-glass grants | v2 | The `AccessPolicy` seam is in place and every endpoint authorizes through it; a stub resolves it until the tables land |
+| **Interaction Log** — timeline, corrections, tickets, attachments | MVP | Built |
+| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Ingestion, the hash chain, verification and search built; exports, scheduled partitioning and retention outstanding |
+| **RBAC** — permission + scope, break-glass grants | v2 | Tables, the real `AccessPolicy`, authentication and `GET /me` built; user and team administration and break-glass grants outstanding |
 | **Task / Reminder** — follow-ups, escalation, SLA dashboard | v3 | Not started |
 
 `SPEC.md` is the contract for all five: data models, API shapes, business rules and edge cases,
@@ -75,20 +75,23 @@ docker compose up -d                      # Postgres + Kafka + S3 + all three Fl
 docker compose --profile seed up seed     # 2 teams, 9 users
 ```
 
-For the services themselves (`client-service` on 8080, `interaction-service` on 8081) you also
-need a token. Nothing issues one yet — `POST /auth/login` arrives with RBAC in v2 — so a script
-stands in for the issuer:
+For the services themselves (`client-service` on 8080, `interaction-service` on 8081) you need a
+token, and `POST /auth/login` issues one:
 
 ```bash
-scripts/dev-jwt.sh keys                   # once: writes .dev/, prints a line for .env
+scripts/dev-jwt.sh keys                   # once: writes .dev/, prints two lines for .env
 docker compose --profile app up -d --build
 
-TOKEN=$(scripts/dev-jwt.sh token 3f000000-0000-4000-8000-000000000002 MANAGER)
-curl -s localhost:8080/api/v1/clients/{id}/summary -H "Authorization: Bearer $TOKEN"
+TOKEN=$(curl -s localhost:8080/api/v1/auth/login           -H 'Content-Type: application/json'           -d '{"email":"a.nowak@bank.example","password":"local-dev-only"}'         | python -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])')
+curl -s localhost:8080/api/v1/me -H "Authorization: Bearer $TOKEN"
 ```
 
-The private key lives in `.dev/`, which is git-ignored. None of this material may be reused
-anywhere a real customer record exists.
+The seeded password is a `{noop}` hash, and the service **refuses to start** with one outside the
+`local` or `test` profile — a demo credential must not be able to become a deployed one.
+client-service holds the signing key because it is the only issuer; the other services get the
+public half only. `scripts/dev-jwt.sh token <uuid> MANAGER` still mints a token by hand when you
+want to debug a request without a session. None of this material may be reused anywhere a real
+customer record exists.
 
 ```bash
 ./mvnw verify                             # full build + Testcontainers integration tests
@@ -111,6 +114,8 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `POST` `/clients/{id}/kyc` · `POST` `/clients/{id}/reassign` | KYC state machine, ownership transfer |
 | `GET`/`POST`/`PATCH` `/clients/{id}/products` | read-only projection of core banking |
 | `GET` `/internal/clients/{id}/access` · `GET` `/internal/users` | what other services authorize against |
+| `POST` `/auth/login` · `/auth/refresh` · `/auth/logout` · `/auth/logout-all` | sessions; refresh tokens rotate and a reused one revokes the family |
+| `GET` `/me` · `GET` `/permissions/matrix` | effective permissions with scopes, and the matrix read from the rows enforcement uses |
 
 **interaction-service** — `/api/v1`
 
@@ -119,10 +124,24 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `POST`/`GET` `/clients/{id}/interactions` | log a contact; keyset-paginated timeline |
 | `GET`/`PATCH`/`DELETE` `/interactions/{id}` | detail, edit inside the 15-minute window, soft delete |
 | `POST` `/interactions/{id}/corrections` | the only remedy after the window closes |
+| `POST`/`GET`/`DELETE` `/interactions/{id}/attachments` | up to 5 per interaction, streamed to object storage |
+| `GET` `/interactions` · `GET` `/tickets` | the cross-client feed and the ticket queue, keyset-paginated |
+| `PATCH` `/interactions/{id}/ticket` | the IL-BR-08 state machine, including the SLA pause |
+
+**audit-service** — `/api/v1/audit`
+
+| Endpoint | What it does |
+|---|---|
+| `GET` `/audit` | keyset search; refuses an unfiltered query, because a 7-year scan is not a request |
+| `POST` `/audit/verify` | recomputes the hash chain; a detected break is `200` with `verified: false` |
+| `GET` `/audit/health` | consumer lag, reported as a gap rather than degrading quietly |
+
+There is no write endpoint, and there must never be one: entries are created solely by consuming
+Kafka, so a compromised application service cannot forge one without also compromising the broker.
 
 ## Testing
 
-231 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+458 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
@@ -149,12 +168,12 @@ client360/
 │   ├── rules/               per-folder rules, loaded by glob
 │   ├── agents/              database-architect, backend-engineer, security-engineer, …
 │   └── skills/              new-migration, new-endpoint, local-stack, pr-description
-├── scripts/dev-jwt.sh       local token issuer, standing in until v2
+├── scripts/dev-jwt.sh       keypair generator; also mints a token by hand for debugging
 ├── src/
 │   ├── common/              crypto, outbox, idempotency, security seam, web envelopes
 │   ├── client-service/      clients, products, and all RBAC tables
 │   ├── interaction-service/ interactions, attachments, tasks
-│   └── audit-service/       (v2)
+│   └── audit-service/       append-only audit_log, hash chain, verification
 └── db/
     ├── init/                extensions, schemas, the restricted role
     ├── migrations/          Flyway, per service, forward-only
@@ -166,6 +185,8 @@ you: the temporal triggers, and why clients are not in the SQL seed.
 
 ## Status
 
-Work in progress, built spec-first with Claude Code. The MVP is not feature-complete: tickets,
-attachments and the cross-client feed are the next items in §6, and `audit-service` has no module
-yet. What is built is tested and runs.
+Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built.
+Outstanding: the user, team and break-glass endpoints of §9.3, audit exports and retention, and
+the whole of Task/Reminder (§7). Two of the three services still authorize through the MVP stub —
+they hold no RBAC tables by design, and the access token now carries the permissions they need to
+stop doing so. What is built is tested and runs.
