@@ -109,7 +109,15 @@ Each service owns a separate PostgreSQL **schema** (one database instance in dev
 | `interaction.events` | interaction-service | `client_id` | 6 | 7 days | audit-service |
 | `task.events` | interaction-service | `client_id` | 6 | 7 days | audit-service, notifier (v3) |
 | `auth.events` | client-service | `user_id` | 3 | 7 days | audit-service |
+| `audit.events` | audit-service | `actor_id` | 3 | 7 days | audit-service |
 | `<topic>.DLT` | consumer-side | original key | 1 | 30 days | manual triage |
+
+**Why audit-service produces a topic it consumes itself.** AT-BR-10 says reading the audit log is
+audited; AT-BR-02 says entries are created only by consuming Kafka. Taken together those forbid the
+obvious implementation — the read handler inserting its own row — because that would be exactly the
+direct write path AT-BR-02 exists to deny, and a compromised audit API could then forge entries
+without touching the broker. The round trip keeps both rules: the service writes an outbox row, the
+relay publishes it, and the same consumer that stores everyone else's events stores this one.
 
 **Delivery semantics:** at-least-once (per `PROJECT_IDEA.md` §9). Consumers are idempotent via the unique constraint on `(occurred_at, event_id)` in `audit_log`.
 
@@ -2620,6 +2628,13 @@ lag from `last_event_at`, which is the only source of it.
 | `403` | `ROLE_REQUIRED` | Manager role — managers have no audit access whatsoever |
 | `403` | `SCOPE_VIOLATION` | Supervisor querying a client outside their team, or any `actorId` other than their own team members |
 
+**`TEAM` scope is refused outright for now, not approximated.** audit-service owns no client table,
+so "clients on their team" cannot be resolved here at all; answering it means asking client-service
+on the read path of the evidence store, which is a dependency worth adding deliberately rather than
+in passing. A supervisor is therefore told no, which is a worse answer than they should get but a
+much better one than rows nobody scope-checked. `ALL` — auditor, admin, compliance — is served in
+full.
+
 Every call to `GET /audit` is itself audited as `READ_SENSITIVE` on `entity_type = 'AUDIT_LOG'`. Watching the watchers is not optional in a banking context.
 
 ---
@@ -2758,7 +2773,7 @@ Downloading an export emits an `EXPORT` audit event carrying the `jobId`, row co
 | AT-BR-07 | `occurred_at` comes from the producer, `recorded_at` from the consumer. Both are stored. Their difference is the pipeline lag, exposed per row as `lagMs`, so a delayed audit is visible as delayed rather than silently back-dated. |
 | AT-BR-08 | Events that fail processing after 5 attempts go to the DLT and raise an alert. **The consumer does not skip them** — the offset is not committed past an unprocessable event without an operator decision, because a silently dropped audit event is exactly the failure this module exists to prevent. |
 | AT-BR-09 | Retention is 7 years, aligned to banking record-keeping. Expired partitions are **detached and archived**, never `DROP`ped in place, and the archival operation is itself audited. |
-| AT-BR-10 | Reading the audit log is audited. `GET /audit`, `GET /audit/exports/{id}` downloads, and verification runs all emit their own entries. |
+| AT-BR-10 | Reading the audit log is audited. `GET /audit`, `GET /audit/exports/{id}` downloads, and verification runs all emit their own entries — through the `audit.events` topic (§3.2), never by inserting directly, which AT-BR-02 forbids. **Not yet implemented:** the endpoints work and the self-audit does not. It is stated here rather than approximated with a direct insert, because an insert would quietly undo the property AT-BR-02 is there for. |
 | AT-BR-11 | Managers have no audit access at all. Supervisors are limited to `TEAM` scope on clients and to their own team's actors. Auditors get read-only `ALL`. Admins get `ALL` plus verification, but **not** the ability to delete — no role in the system can delete an audit row. |
 | AT-BR-12 | `PERMISSION_DENIED` events are audited with the full attempted request. A failed access attempt is more interesting to an investigator than a successful one, so it must never be dropped as noise. |
 | AT-BR-13 | Break-glass reads carry the `access_grant_id` and the stated reason in `context`, so a `READ_SENSITIVE` outside normal scope is self-explaining in the log without a join into another service. |
@@ -3186,6 +3201,8 @@ users *───* clients             (access_grants: time-boxed break-glass)
 
 Response time is constant (≈ 250 ms) whether or not the email exists — an unknown email still performs a dummy bcrypt comparison, so timing does not leak account existence.
 
+**Order of checks.** The password is verified *first*; the three `403` outcomes above are reported only to a caller whose password was correct. Reporting a lock or a deactivation to a caller who failed the password would rebuild the account-enumeration oracle that the single `INVALID_CREDENTIALS` code exists to prevent — five wrong guesses would turn any address into a yes-or-no answer about whether it belongs to staff, since an address with no account can never be locked. A locked account presented with a *wrong* password therefore answers `401 INVALID_CREDENTIALS`, and the failure still counts toward RB-BR-11. A genuine user who types their real password still learns exactly why they cannot get in, which is the case the specific codes are for.
+
 ---
 
 #### `POST /auth/refresh`
@@ -3235,6 +3252,8 @@ Revokes the presented refresh token, or every token for the user. **`204 No Cont
 ```
 
 The SPA builds its entire navigation from `permissions`. No role strings are hard-coded in the frontend, so adding a role never requires a frontend release.
+
+`teams` lists the teams in the caller's **scope** (RB-BR-02) — supervised teams included, whether or not a `team_members` row exists — not only their memberships, so the screen cannot contradict what the API will let them read. `permissions`, `roles` and `teams` are read from the tables rather than from the access token that authenticated the request: the token is a 15-minute snapshot, and answering from it would leave a user looking at menu items a role change had already taken away.
 
 ---
 
@@ -3311,7 +3330,7 @@ Returns roles × permissions × scopes, read from `role_permissions` — the sam
 | RB-BR-02 | **Scope resolution.** `OWN` → `clients.owner_manager_id = :userId`. `TEAM` → `clients.team_id IN (teams where the user is supervisor or an active member)`. `ALL` → unrestricted. Non-client entities inherit the scope of their client: an interaction is in scope exactly when its client is. |
 | RB-BR-03 | A user holding several roles gets the **union** of permissions and, for any shared permission, the **widest** scope. A manager who is also an auditor reads all clients and writes only their own. |
 | RB-BR-04 | An active break-glass grant widens `client:read`, `client:write`, `interaction:*` and `task:*` for that one client, for its window only. It never widens `client:delete`, `client:merge`, `*:reassign` or any audit permission — break-glass is for continuity of service, not for privilege escalation. |
-| RB-BR-05 | The access token carries `userId`, `roles`, `permissions` with scopes, `teamIds` and `grantIds`. It lives 15 minutes, so a revocation takes effect within 15 minutes at worst, and immediately on the next refresh. Deactivation additionally pushes a revocation to a shared denylist checked on every request, bounding it to 60 seconds (RB-US-04). |
+| RB-BR-05 | The access token carries `userId`, `roles`, `permissions` with scopes, `teamIds` and `grantIds`. It lives 15 minutes, so a revocation takes effect within 15 minutes at worst, and immediately on the next refresh. In `client-service` the bound is tighter than that and needs no denylist: `AccessPolicy` resolves permission and scope from `user_roles` per request and requires `users.status = 'ACTIVE'`, so a deactivation or a role change ends access on the **next request**, not within 60 seconds. The token's claims are the fallback for the two services that hold no RBAC tables, where the 15-minute lifetime is the bound. |
 | RB-BR-06 | **No self-elevation.** A user cannot grant themselves a role, approve their own break-glass request, or approve KYC on a client they own (CP-BR-05). Enforced at request time by comparing the acting subject with the target, so holding `role:assign` is not enough. |
 | RB-BR-07 | **Referential safety on deactivation.** Deactivation is refused while the user owns clients, is assigned open tasks, is the assignee of open tickets, or is the sole supervisor of a team. The `409` response enumerates each blocker with counts and a deep link, so the admin can clear them in one pass. This is what makes `ON DELETE RESTRICT` on `owner_manager_id` a safety net rather than a wall. |
 | RB-BR-08 | At least one `ACTIVE` user with the `ADMIN` role must exist at all times. Removing the last admin role or deactivating the last admin returns `422 BUSINESS_RULE_VIOLATED`. A system nobody can administer is unrecoverable. |
@@ -3407,7 +3426,7 @@ Returns roles × permissions × scopes, read from `role_permissions` — the sam
 | RB-EC-11 | A role's permission set is edited while 200 users hold it | The change is data, not code, and applies on each user's next token refresh. `GET /permissions/matrix` reflects it immediately, so the admin can verify before the fleet catches up |
 | RB-EC-12 | A user with an expired `user_roles.expires_at` makes a request | The partial index excludes expired grants from permission resolution, so the role silently stops applying. `/me` shows it as expired rather than dropping it without explanation |
 | RB-EC-13 | JWT signing key is rotated | Tokens carry a `kid`; the gateway accepts both the old and new key for one full refresh lifetime (8 h), then drops the old one. No forced mass logout |
-| RB-EC-14 | A deactivated user's access token is still within its 15-minute life | The revocation denylist is checked on every request, so access ends within 60 s (RB-BR-05). The token's own expiry is the fallback, not the primary control |
+| RB-EC-14 | A deactivated user's access token is still within its 15-minute life | In `client-service` every authorization decision re-reads `users.status`, so access ends on the next request. Elsewhere the 15-minute expiry is the bound, and `POST /auth/refresh` refuses a deactivated user, so the session cannot be extended (RB-BR-05) |
 | RB-EC-15 | A manager tries to read the audit log directly by URL | `403 ROLE_REQUIRED` — no audit permission exists for the manager role at any scope. The attempt is itself audited as `PERMISSION_DENIED` |
 | RB-EC-16 | A client has no owner because their manager's account was force-deleted in the database | `ON DELETE RESTRICT` makes this impossible through any supported path. If it occurs through direct DB manipulation, the client fails scope resolution and appears only to admins, and a nightly consistency check reports it |
 
