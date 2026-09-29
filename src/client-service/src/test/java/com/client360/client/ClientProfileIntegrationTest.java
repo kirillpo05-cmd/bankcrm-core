@@ -55,7 +55,15 @@ class ClientProfileIntegrationTest extends AbstractIntegrationTest {
         /** CP-BR-03 has no answer for an owner with no team, so the create is refused, not guessed. */
         @Test
         void refusesOwnerWithoutPrimaryTeam_CP_BR_03() throws Exception {
-            mvc.perform(create(body("CIF-1", "a@example.com", "+48511234567", SOFIA_ADAMSKA)))
+            // As an admin, because assigning a client to somebody else needs client:write beyond
+            // OWN scope. A manager attempting it is refused by RB-BR-02 first, and never reaches
+            // the rule under test — which is the correct order, and only visible now that
+            // authorization comes from the tables rather than a stub.
+            mvc.perform(post("/api/v1/clients")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "ADMIN"))
+                            .header(IdempotencyService.HEADER, UUID.randomUUID().toString())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body("CIF-1", "a@example.com", "+48511234567", SOFIA_ADAMSKA)))
                     .andExpect(status().isUnprocessableEntity())
                     .andExpect(jsonPath("$.code").value("BUSINESS_RULE_VIOLATED"));
         }

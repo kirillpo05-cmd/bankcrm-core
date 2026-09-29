@@ -9,13 +9,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** {@code PATCH /clients/{id}} — CP-US-03, §4.8 and the §5.3 field-level rules. */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientUpdateIntegrationTest extends AbstractIntegrationTest {
 
     @Nested

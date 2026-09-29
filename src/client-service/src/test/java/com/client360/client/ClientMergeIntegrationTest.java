@@ -11,7 +11,6 @@ import com.client360.common.idempotency.IdempotencyService;
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
@@ -22,7 +21,6 @@ import org.springframework.test.web.servlet.ResultActions;
  * <p>A merge is irreversible through the API (Q-08), so the interesting cases are the ones it
  * refuses: what it will not do is the whole safety of the feature.
  */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientMergeIntegrationTest extends AbstractIntegrationTest {
 
     private static final String REASON = "Same person, duplicate created by the branch import on 2026-08-30";

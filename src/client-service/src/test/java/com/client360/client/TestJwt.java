@@ -39,6 +39,24 @@ public final class TestJwt {
         }
     }
 
+    /**
+     * PKCS#8 PEM for {@code client360.security.issuer.private-key}.
+     *
+     * <p>The same keypair as {@link #publicKeyPem()}, which is the point: since
+     * {@code POST /auth/login} exists, a test can log in and then use the token the service itself
+     * signed against the real {@code NimbusJwtDecoder}. Nothing about the session is simulated.
+     */
+    public static String privateKeyPem() {
+        try {
+            byte[] der = KEY.toRSAPrivateKey().getEncoded();
+            return "-----BEGIN PRIVATE KEY-----\n"
+                    + Base64.getMimeEncoder(64, new byte[] {'\n'}).encodeToString(der)
+                    + "\n-----END PRIVATE KEY-----\n";
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot render the test private key", e);
+        }
+    }
+
     public static String bearerFor(UUID userId, String email, String fullName, List<String> roles) {
         return "Bearer " + tokenFor(userId, email, fullName, roles);
     }

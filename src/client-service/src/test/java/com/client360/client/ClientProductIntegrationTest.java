@@ -11,14 +11,12 @@ import com.client360.common.idempotency.IdempotencyService;
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** The product sub-resource (SPEC.md §5.3, CP-US-07, CP-BR-07). */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientProductIntegrationTest extends AbstractIntegrationTest {
 
     @Nested

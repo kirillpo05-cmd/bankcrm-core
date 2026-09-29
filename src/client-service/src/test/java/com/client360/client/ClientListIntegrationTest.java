@@ -8,12 +8,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** {@code GET /clients} — the scoped admin list (SPEC.md §5.3, §4.5). */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientListIntegrationTest extends AbstractIntegrationTest {
 
     @Nested

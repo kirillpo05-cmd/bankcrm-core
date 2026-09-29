@@ -11,13 +11,11 @@ import java.time.ZoneOffset;
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** {@code POST /clients/{id}/kyc} — the CP-BR-04 state machine under CP-BR-05's separation of duties. */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientKycIntegrationTest extends AbstractIntegrationTest {
 
     private static final LocalDate YESTERDAY = LocalDate.now(ZoneOffset.UTC).minusDays(1);

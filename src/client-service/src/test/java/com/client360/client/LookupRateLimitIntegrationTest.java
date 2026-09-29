@@ -11,7 +11,6 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 
@@ -23,7 +22,6 @@ import org.springframework.http.HttpHeaders;
  * it is also the endpoint an attacker would use to enumerate customers. The limit is the only thing
  * between those two facts.
  */
-@Import(MatrixAccessPolicy.Config.class)
 class LookupRateLimitIntegrationTest extends AbstractIntegrationTest {
 
     private static final int LIMIT = 60;

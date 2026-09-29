@@ -8,14 +8,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 
 /**
  * The two questions other services ask client-service (SPEC.md §5.3 "Internal endpoints"). They
  * decide what interaction-service may do, so they get the same scrutiny as any public endpoint.
  */
-@Import(MatrixAccessPolicy.Config.class)
 class InternalEndpointsIntegrationTest extends AbstractIntegrationTest {
 
     @Nested

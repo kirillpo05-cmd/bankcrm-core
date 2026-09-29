@@ -32,7 +32,7 @@ import org.springframework.web.client.RestClient;
  * {@code READ_SENSITIVE} disclosure, which panels degrade and — the point of the endpoint — that a
  * panel which could not load is never reported as a panel that is empty.
  */
-@Import({MatrixAccessPolicy.Config.class, ClientCardIntegrationTest.Feed.class})
+@Import(ClientCardIntegrationTest.Feed.class)
 class ClientCardIntegrationTest extends AbstractIntegrationTest {
 
     /** Flipped by a test to make the timeline panel fail the way a real outage would. */
@@ -124,6 +124,10 @@ class ClientCardIntegrationTest extends AbstractIntegrationTest {
         @Test
         void omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02() throws Exception {
             String id = createClient(ADAM_NOWAK, "CIF-1", "a@example.com", "+48511234567");
+            // No §9.2.8 role holds client:read without interaction:read, so the combination needs a
+            // role of its own. RB-BR-03 composes roles freely, which is what makes it reachable in
+            // production and worth checking rather than assuming.
+            customRole("PROFILE_ONLY", "client:read");
             mvc.perform(summary(id, MARTA_LEWANDOWSKA, "PROFILE_ONLY"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.client.id").value(id))
@@ -171,6 +175,22 @@ class ClientCardIntegrationTest extends AbstractIntegrationTest {
             mvc.perform(summary(id, JAN_ZIELINSKI, "MANAGER")).andExpect(status().isNotFound());
             assertThat(countEvents("client.permission_denied")).isEqualTo(1);
             assertThat(countEvents("client.read_sensitive")).isZero();
+        }
+    }
+
+    /** A role that grants exactly the codes named, at ALL scope. */
+    private void customRole(String code, String... permissionCodes) {
+        jdbc.sql("INSERT INTO client.roles (code, name) VALUES (:code, :code)" + " ON CONFLICT (code) DO NOTHING")
+                .param("code", code)
+                .update();
+        for (String permission : permissionCodes) {
+            jdbc.sql("INSERT INTO client.role_permissions (role_id, permission_id, scope)"
+                            + " SELECT r.id, p.id, 'ALL' FROM client.roles r, client.permissions p"
+                            + "  WHERE r.code = :role AND p.code = :permission"
+                            + " ON CONFLICT (role_id, permission_id) DO NOTHING")
+                    .param("role", code)
+                    .param("permission", permission)
+                    .update();
         }
     }
 

@@ -11,13 +11,11 @@ import com.client360.common.idempotency.IdempotencyService;
 import java.util.UUID;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** Ownership and lifecycle: {@code POST /clients/{id}/reassign} (CP-US-05) and soft delete (§4.9). */
-@Import(MatrixAccessPolicy.Config.class)
 class ClientLifecycleIntegrationTest extends AbstractIntegrationTest {
 
     private static final String REASON = "Parental leave cover until 2027-01";
