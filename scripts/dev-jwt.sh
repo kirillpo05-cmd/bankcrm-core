@@ -65,6 +65,15 @@ cmd_token() {
 
     signing_input="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
     signature=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$KEY" | b64url)
+
+    # This token carries no `permissions` claim, and since RBAC landed that claim is what
+    # authorizes a request in interaction-service and audit-service (RB-BR-05): they hold no
+    # RBAC tables, so they read the token. A hand-minted token therefore authenticates
+    # everywhere and authorizes nothing outside client-service, which reads the tables and
+    # honours whatever roles the user actually holds. For a session that works everywhere,
+    # use POST /api/v1/auth/login.
+    echo "Note: no permissions claim, so this authorizes nothing outside client-service." >&2
+    echo "      For a full session use POST /api/v1/auth/login." >&2
     printf '%s.%s\n' "$signing_input" "$signature"
 }
 

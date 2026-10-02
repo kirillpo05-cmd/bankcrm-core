@@ -89,9 +89,10 @@ curl -s localhost:8080/api/v1/me -H "Authorization: Bearer $TOKEN"
 The seeded password is a `{noop}` hash, and the service **refuses to start** with one outside the
 `local` or `test` profile — a demo credential must not be able to become a deployed one.
 client-service holds the signing key because it is the only issuer; the other services get the
-public half only. `scripts/dev-jwt.sh token <uuid> MANAGER` still mints a token by hand when you
-want to debug a request without a session. None of this material may be reused anywhere a real
-customer record exists.
+public half only. `scripts/dev-jwt.sh token <uuid> MANAGER` still mints a token by hand, but it
+carries no `permissions` claim — and that claim is what authorizes a request in interaction-service
+and audit-service, so a hand-minted token authenticates everywhere and authorizes nothing outside
+client-service. None of this material may be reused anywhere a real customer record exists.
 
 ```bash
 ./mvnw verify                             # full build + Testcontainers integration tests
@@ -113,7 +114,7 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `GET` `/clients/{id}/summary` | the card's first paint, with partial failures in `degraded[]` |
 | `POST` `/clients/{id}/kyc` · `POST` `/clients/{id}/reassign` | KYC state machine, ownership transfer |
 | `GET`/`POST`/`PATCH` `/clients/{id}/products` | read-only projection of core banking |
-| `GET` `/internal/clients/{id}/access` · `GET` `/internal/users` | what other services authorize against |
+| `GET` `/internal/clients/{id}/access` · `/internal/users` · `/internal/me/teams` | what other services authorize against |
 | `POST` `/auth/login` · `/auth/refresh` · `/auth/logout` · `/auth/logout-all` | sessions; refresh tokens rotate and a reused one revokes the family |
 | `GET` `/me` · `GET` `/permissions/matrix` | effective permissions with scopes, and the matrix read from the rows enforcement uses |
 
@@ -141,7 +142,7 @@ Kafka, so a compromised application service cannot forge one without also compro
 
 ## Testing
 
-458 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+467 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
@@ -187,6 +188,7 @@ you: the temporal triggers, and why clients are not in the SQL seed.
 
 Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built.
 Outstanding: the user, team and break-glass endpoints of §9.3, audit exports and retention, and
-the whole of Task/Reminder (§7). Two of the three services still authorize through the MVP stub —
-they hold no RBAC tables by design, and the access token now carries the permissions they need to
-stop doing so. What is built is tested and runs.
+the whole of Task/Reminder (§7). All three services now enforce real permissions: client-service
+reads the RBAC tables it owns, and the other two read the access token's `permissions` claim, which
+is what lets there be one authorization authority and no call per check. What is built is tested and
+runs.

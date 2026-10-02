@@ -56,7 +56,9 @@ denormalized fields on Kafka events.
 4. **Nothing deletes an audit row.** No endpoint, no role, no permission code. `audit-service`
    has no write API.
 5. **Authorize on `permission + scope`, never on a role string.** Ask "does this user hold
-   `client:write` covering client X?" — never `hasRole('SUPERVISOR')`.
+   `client:write` covering client X?" — never `hasRole('SUPERVISOR')`. `client-service` resolves the
+   seam from its own tables; the other two read the access token's `permissions` claim and ask
+   `client-service` about a specific client. Neither ever reads `roles`.
 6. **Money is `BIGINT` minor units + ISO currency.** No floating point, anywhere.
 7. **Timestamps are `TIMESTAMPTZ`, UTC, from `now()` in PostgreSQL** — never the JVM clock,
    so overdue is evaluated against one clock system-wide.
