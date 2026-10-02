@@ -1011,8 +1011,8 @@ talk to, not code.
 
 #### Internal endpoints — how other services ask
 
-`interaction-service` and `audit-service` own no client or user table (§3.1), so the two questions
-they cannot answer themselves are answered here. Both relay the **caller's own bearer token**, not
+`interaction-service` and `audit-service` own no client or user table (§3.1), so the questions they
+cannot answer themselves are answered here. All of them relay the **caller's own bearer token**, not
 a service credential: the decision is about the human making the request, so their identity has to
 survive the hop, and ER-01's `404` passes back through the calling service unchanged.
 
@@ -1020,6 +1020,15 @@ survive the hop, and ER-01's `404` passes back through the calling service uncha
 |---|---|---|
 | `GET` | `/internal/clients/{id}/access?permission=<code>` | `200` with `{clientId, ownerManagerId, teamId, status, kycStatus}` when the caller holds that permission over the client; `404` when absent or out of scope; `403` when the permission is held at no scope |
 | `GET` | `/internal/users?ids=<uuid>,<uuid>` | `200` with `[{id, fullName}]` — display names for authors and assignees, capped at 100 ids |
+| `GET` | `/internal/me/teams` | `200` with `{teamIds, primaryTeamId}` — the caller's own `TEAM` scope (RB-BR-02), for a question about many clients at once |
+
+`/internal/me/teams` exists because `/access` settles one client and the cross-client feed and team
+ticket queue have no client id to ask about. `teamIds` is a **set**: RB-BR-02's `TEAM` is every team
+the caller supervises plus every team they are an active member of, which since `team_members` can be
+more than one. A caller must read an empty array as "no team", never as "every team" — otherwise
+client-service being unreachable becomes the one condition under which a supervisor sees the whole
+bank. It needs authentication and no permission, and writes no audit event: knowing your own team is
+not a disclosure.
 
 Deliberately **not** `GET /clients/{id}`. Authorizing a write to an interaction does not need the
 client's name, email or phone; reusing the card would ship all three between services and write a
