@@ -55,6 +55,7 @@ import com.client360.interaction.support.PanMasker;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -507,9 +508,11 @@ public class InteractionService {
      * {@code GET /interactions} (§6.3, IL-US-07) — the supervisor's cross-client coaching feed.
      *
      * <p>Answerable at all only because V6 denormalized the owning team onto each row. The scope
-     * decides the team, never the caller: at {@code TEAM} the feed is the caller's own team,
-     * resolved from client-service because membership changes and a token claim would not; at
-     * {@code ALL} an explicit {@code teamId} narrows it and its absence means everyone.
+     * decides the teams, never the caller: at {@code TEAM} the feed is every team in the caller's
+     * scope — which since client-service gained {@code team_members} can be more than one, so a
+     * supervisor covering two branches sees both — resolved from client-service because membership
+     * changes and a token claim would not; at {@code ALL} an explicit {@code teamId} narrows it and
+     * its absence means everyone.
      *
      * <p>{@code OWN} is refused outright. A manager's own clients are their timelines, one at a
      * time; there is nothing a cross-client feed would add for them but a list of the same rows.
@@ -525,21 +528,25 @@ public class InteractionService {
                                 ErrorCodes.PERMISSION_DENIED, "This action requires the interaction:read permission.")
                         .detail("permission", INTERACTION_READ));
 
-        UUID teamId;
+        List<UUID> teamIds;
         if (scope == Scope.ALL) {
-            teamId = filter.teamId();
+            teamIds = filter.teamId() == null ? List.of() : List.of(filter.teamId());
         } else if (scope == Scope.TEAM) {
-            UUID own = directory
-                    .teamOf(caller.id())
-                    .orElseThrow(() -> ApiException.forbidden(
-                            ErrorCodes.PERMISSION_DENIED,
-                            "Your team could not be resolved, so this feed cannot be scoped."));
-            if (filter.teamId() != null && !filter.teamId().equals(own)) {
-                // Naming someone else's team is not a smaller request, it is a different one.
-                throw ApiException.forbidden(ErrorCodes.PERMISSION_DENIED, "This feed is limited to your own team.")
-                        .detail("teamId", own);
+            Set<UUID> own = directory.scopeTeamsOf();
+            if (own.isEmpty()) {
+                // An empty scope is "no team", never "every team". Refusing is the only reading that
+                // cannot turn an unreachable client-service into an unscoped feed.
+                throw ApiException.forbidden(
+                        ErrorCodes.PERMISSION_DENIED,
+                        "Your teams could not be resolved, so this feed cannot be scoped.");
             }
-            teamId = own;
+            if (filter.teamId() != null && !own.contains(filter.teamId())) {
+                // Naming someone else's team is not a smaller request, it is a different one.
+                throw ApiException.forbidden(ErrorCodes.PERMISSION_DENIED, "This feed is limited to your own teams.")
+                        .detail("teamIds", List.copyOf(own));
+            }
+            // A named team of their own narrows it; otherwise all of them.
+            teamIds = filter.teamId() != null ? List.of(filter.teamId()) : List.copyOf(own);
         } else {
             throw ApiException.forbidden(
                             ErrorCodes.PERMISSION_DENIED,
@@ -550,7 +557,7 @@ public class InteractionService {
         int pageSize = requireLimit(limit);
         List<TimelineRow> rows = interactions.crossClientFeed(
                 new FeedQuery(
-                        teamId,
+                        teamIds,
                         filter.clientId(),
                         filter.authorId(),
                         filter.types(),
@@ -609,16 +616,19 @@ public class InteractionService {
         }
 
         UUID assigneeId = filter.assigneeId();
-        UUID teamId = null;
+        List<UUID> teamIds = List.of();
         if (filter.clientId() == null) {
             // V6 made the team's queue answerable: the rows carry the owning team, so a supervisor
             // can be scoped to their own clients without this service holding a client table.
             if (scope == Scope.TEAM) {
-                teamId = directory
-                        .teamOf(caller.id())
-                        .orElseThrow(() -> ApiException.forbidden(
-                                ErrorCodes.PERMISSION_DENIED,
-                                "Your team could not be resolved, so this queue cannot be scoped."));
+                Set<UUID> own = directory.scopeTeamsOf();
+                if (own.isEmpty()) {
+                    // "No team", never "every team" — see the feed for why that distinction matters.
+                    throw ApiException.forbidden(
+                            ErrorCodes.PERMISSION_DENIED,
+                            "Your teams could not be resolved, so this queue cannot be scoped.");
+                }
+                teamIds = List.copyOf(own);
             } else if (scope == Scope.OWN && assigneeId == null) {
                 // "My open tickets" — the tickets on the caller's own desk.
                 assigneeId = caller.id();
@@ -637,7 +647,7 @@ public class InteractionService {
                 new TicketQuery(
                         assigneeId,
                         filter.clientId(),
-                        teamId,
+                        teamIds,
                         filter.statuses(),
                         filter.priority(),
                         filter.slaBreached(),

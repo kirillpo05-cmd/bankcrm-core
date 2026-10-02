@@ -106,6 +106,55 @@ class InternalEndpointsIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    /**
+     * {@code GET /internal/me/teams} — the caller's own TEAM scope, for the questions
+     * {@code /access} cannot answer because they name no client (§5.3, RB-BR-02).
+     */
+    @Nested
+    class Scope {
+
+        @Test
+        void answersWithTheCallersOwnTeams_RB_BR_02() throws Exception {
+            mvc.perform(get("/api/v1/internal/me/teams")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(ADAM_NOWAK, "MANAGER")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.teamIds.length()").value(1))
+                    .andExpect(jsonPath("$.teamIds[0]").value(TEAM_RWN.toString()))
+                    .andExpect(jsonPath("$.primaryTeamId").value(TEAM_RWN.toString()));
+        }
+
+        /** A set, because a supervisor covering two branches supervises both. */
+        @Test
+        void includesSupervisedTeamsAndExtraMemberships_RB_BR_02() throws Exception {
+            jdbc.sql("UPDATE client.teams SET supervisor_id = :user WHERE id = :team")
+                    .param("user", ADAM_NOWAK)
+                    .param("team", TEAM_RWS)
+                    .update();
+            mvc.perform(get("/api/v1/internal/me/teams")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(ADAM_NOWAK, "SUPERVISOR")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.teamIds.length()").value(2))
+                    // The primary stays the primary: CP-BR-03 derives a new client's team from it,
+                    // and supervising a second branch must not make that ambiguous.
+                    .andExpect(jsonPath("$.primaryTeamId").value(TEAM_RWN.toString()));
+        }
+
+        /** Empty is "no team", and the caller is required to read it that way. */
+        @Test
+        void isEmptyForACrossTeamRole_CP_BR_03() throws Exception {
+            mvc.perform(get("/api/v1/internal/me/teams")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(SOFIA_ADAMSKA, "ADMIN")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.teamIds").isEmpty())
+                    .andExpect(jsonPath("$.primaryTeamId").doesNotExist());
+        }
+
+        @Test
+        void requiresAuthentication() throws Exception {
+            mvc.perform(get("/api/v1/internal/me/teams")).andExpect(status().isUnauthorized());
+        }
+    }
+
     @Nested
     class Users {
 

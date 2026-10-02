@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -40,16 +41,33 @@ public final class TestJwt {
     }
 
     public static String bearerFor(UUID userId, String email, String fullName, List<String> roles) {
-        return "Bearer " + tokenFor(userId, email, fullName, roles);
+        return bearerFor(userId, email, fullName, roles, Map.of());
+    }
+
+    /**
+     * @param permissions the {@code permissions} claim (RB-BR-05), permission code to scope name.
+     *     This is what authorizes the request in this service: it holds no RBAC tables, so
+     *     {@code TokenAccessPolicy} reads the claim. An empty map is a token that authenticates and
+     *     grants nothing, which is the correct reading of a token that does not say what it allows.
+     */
+    public static String bearerFor(
+            UUID userId, String email, String fullName, List<String> roles, Map<String, String> permissions) {
+        return "Bearer " + tokenFor(userId, email, fullName, roles, permissions);
     }
 
     public static String tokenFor(UUID userId, String email, String fullName, List<String> roles) {
+        return tokenFor(userId, email, fullName, roles, Map.of());
+    }
+
+    public static String tokenFor(
+            UUID userId, String email, String fullName, List<String> roles, Map<String, String> permissions) {
         Instant now = Instant.now();
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
                 .subject(userId.toString())
                 .claim(CurrentUsers.CLAIM_EMAIL, email)
                 .claim(CurrentUsers.CLAIM_NAME, fullName)
                 .claim(CurrentUsers.CLAIM_ROLES, roles)
+                .claim(CurrentUsers.CLAIM_PERMISSIONS, permissions)
                 .issueTime(Date.from(now))
                 .expirationTime(Date.from(now.plusSeconds(900)))
                 .build();

@@ -106,10 +106,14 @@ public class SecurityConfig implements WebMvcConfigurer {
         return decoder;
     }
 
-    /** Stub until v2, which replaces this bean method; see {@link MvpAccessPolicy}. */
+    /**
+     * The default for a service that only verifies tokens: permission and scope come from the
+     * token's own claims (RB-BR-05). client-service overrides this with a {@code @Primary} bean that
+     * reads the tables, because it owns them and can answer without a snapshot.
+     */
     @Bean
-    AccessPolicy mvpAccessPolicy() {
-        return new MvpAccessPolicy();
+    AccessPolicy tokenAccessPolicy() {
+        return new TokenAccessPolicy();
     }
 
     @Bean

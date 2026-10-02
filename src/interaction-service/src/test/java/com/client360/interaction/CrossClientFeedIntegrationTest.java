@@ -117,6 +117,59 @@ class CrossClientFeedIntegrationTest extends AbstractInteractionIntegrationTest 
                     .andExpect(jsonPath("$.content.length()").value(1));
         }
 
+        /**
+         * RB-BR-02's {@code TEAM} is a set, not a team. A supervisor covering two branches supervises
+         * both, and until client-service gained {@code team_members} that case could not even be
+         * recorded — this service resolved the scope to one {@code primary_team_id} and showed such a
+         * supervisor half their own book. A feed missing rows looks exactly like a quiet week, which
+         * is why this is a test and not a comment.
+         */
+        @Test
+        void aSupervisorCoveringTwoBranchesSeesBoth_RB_BR_02() throws Exception {
+            String rwn = log("CALL", "Mortgage rate question", "TEAM");
+            String rws = log("CALL", "A call from the other branch", "TEAM");
+            moveToOtherTeam(rws);
+
+            scopeTeams = java.util.Set.of(TEAM_RWN, TEAM_RWS);
+            feed(OLA_WISNIEWSKA, "SUPERVISOR", "")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.content.length()").value(2));
+
+            // And one branch alone still means one branch.
+            scopeTeams = java.util.Set.of(TEAM_RWN);
+            feed(OLA_WISNIEWSKA, "SUPERVISOR", "")
+                    .andExpect(jsonPath("$.content.length()").value(1))
+                    .andExpect(jsonPath("$.content[0].subject").value("Mortgage rate question"));
+            assertThat(rwn).isNotEqualTo(rws);
+        }
+
+        /** Naming one of their own teams narrows the feed; it is the only narrowing on offer. */
+        @Test
+        void aNamedTeamOfTheirOwnNarrowsTheFeed_RB_BR_02() throws Exception {
+            log("CALL", "Mortgage rate question", "TEAM");
+            moveToOtherTeam(log("CALL", "A call from the other branch", "TEAM"));
+            scopeTeams = java.util.Set.of(TEAM_RWN, TEAM_RWS);
+
+            feed(OLA_WISNIEWSKA, "SUPERVISOR", "&teamId=" + TEAM_RWS)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.content.length()").value(1))
+                    .andExpect(jsonPath("$.content[0].subject").value("A call from the other branch"));
+        }
+
+        /**
+         * A scope that could not be resolved is refused, never treated as unfiltered. client-service
+         * being unreachable must not be the one condition under which a supervisor sees every team in
+         * the bank.
+         */
+        @Test
+        void anUnresolvableScopeIsRefusedRatherThanWidened_RB_BR_02() throws Exception {
+            log("CALL", "Mortgage rate question", "TEAM");
+            scopeTeams = java.util.Set.of();
+            feed(OLA_WISNIEWSKA, "SUPERVISOR", "")
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value("PERMISSION_DENIED"));
+        }
+
         @Test
         void filtersByTypeAndAuthor() throws Exception {
             log("CALL", "Mortgage rate question", "TEAM");
@@ -142,7 +195,7 @@ class CrossClientFeedIntegrationTest extends AbstractInteractionIntegrationTest 
             String id = log("CALL", "Mortgage rate question", "TEAM");
             assertThat(scopeOf(id)).containsExactly(ADAM_NOWAK, TEAM_RWN);
 
-            UUID newTeam = UUID.fromString("7a000000-0000-4000-8000-000000000002");
+            UUID newTeam = TEAM_RWS;
             int updated = rescope(CLIENT_ID, MARTA_LEWANDOWSKA, newTeam);
 
             assertThat(updated).isEqualTo(1);
@@ -156,7 +209,7 @@ class CrossClientFeedIntegrationTest extends AbstractInteractionIntegrationTest 
         @Test
         void applyingTheSameReassignmentTwiceChangesNothing() throws Exception {
             log("CALL", "Mortgage rate question", "TEAM");
-            UUID newTeam = UUID.fromString("7a000000-0000-4000-8000-000000000002");
+            UUID newTeam = TEAM_RWS;
 
             assertThat(rescope(CLIENT_ID, MARTA_LEWANDOWSKA, newTeam)).isEqualTo(1);
             assertThat(rescope(CLIENT_ID, MARTA_LEWANDOWSKA, newTeam)).isZero();
@@ -183,6 +236,14 @@ class CrossClientFeedIntegrationTest extends AbstractInteractionIntegrationTest 
                 .query((rs, n) -> java.util.List.of(
                         rs.getObject("client_owner_id", UUID.class), rs.getObject("client_team_id", UUID.class)))
                 .single();
+    }
+
+    /** Puts one already-logged interaction in the other branch, as a reassignment would. */
+    private void moveToOtherTeam(String interactionId) {
+        jdbc.sql("UPDATE interaction.interactions SET client_team_id = :team WHERE id = CAST(:id AS uuid)")
+                .param("team", TEAM_RWS)
+                .param("id", interactionId)
+                .update();
     }
 
     private ResultActions feed(UUID actor, String role, String extraQuery) throws Exception {

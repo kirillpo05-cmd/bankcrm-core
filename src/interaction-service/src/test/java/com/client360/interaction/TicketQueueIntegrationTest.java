@@ -222,13 +222,44 @@ class TicketQueueIntegrationTest extends AbstractInteractionIntegrationTest {
         void aSupervisorsQueueStopsAtTheirTeamsClients_IL_US_05() throws Exception {
             raise("HIGH", "Ours", ADAM_NOWAK);
             jdbc.sql("UPDATE interaction.interactions SET client_team_id = :other")
-                    .param("other", UUID.fromString("7a000000-0000-4000-8000-000000000002"))
+                    .param("other", TEAM_RWS)
                     .update();
 
             mvc.perform(get("/api/v1/tickets")
                             .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.content.length()").value(0));
+        }
+
+        /**
+         * And it stops there only because that team is outside their scope. The same ticket is in the
+         * queue of a supervisor who covers both branches (RB-BR-02) — the queue follows the scope, not
+         * a single primary team.
+         */
+        @Test
+        void aSupervisorCoveringBothBranchesSeesBoth_RB_BR_02() throws Exception {
+            raise("HIGH", "Ours", ADAM_NOWAK);
+            jdbc.sql("UPDATE interaction.interactions SET client_team_id = :other")
+                    .param("other", TEAM_RWS)
+                    .update();
+            scopeTeams = java.util.Set.of(TEAM_RWN, TEAM_RWS);
+
+            mvc.perform(get("/api/v1/tickets")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.content.length()").value(1));
+        }
+
+        /** An unresolvable scope is refused, never quietly widened to every team in the bank. */
+        @Test
+        void anUnresolvableScopeIsRefused_RB_BR_02() throws Exception {
+            raise("HIGH", "Ours", ADAM_NOWAK);
+            scopeTeams = java.util.Set.of();
+
+            mvc.perform(get("/api/v1/tickets")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value("PERMISSION_DENIED"));
         }
 
         @Test

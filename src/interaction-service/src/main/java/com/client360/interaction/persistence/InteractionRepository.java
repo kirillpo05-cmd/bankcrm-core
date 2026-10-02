@@ -149,7 +149,8 @@ public class InteractionRepository {
                          FROM interactions
                          WHERE deleted_at IS NULL
                            AND visibility <> 'PRIVATE'
-                           AND (CAST(:teamId AS uuid) IS NULL OR client_team_id = CAST(:teamId AS uuid))
+                           AND (CAST(:teamIds AS uuid[]) IS NULL
+                                OR client_team_id = ANY (CAST(:teamIds AS uuid[])))
                            AND (CAST(:clientId AS uuid) IS NULL OR client_id = CAST(:clientId AS uuid))
                            AND (CAST(:authorId AS uuid) IS NULL OR author_id = CAST(:authorId AS uuid))
                            AND (CAST(:types AS text[]) IS NULL OR type::text = ANY (CAST(:types AS text[])))
@@ -160,7 +161,7 @@ public class InteractionRepository {
                          ORDER BY occurred_at DESC, id DESC
                          LIMIT :limit
                         """)
-                .param("teamId", query.teamId())
+                .param("teamIds", uuidArray(query.teamIds()))
                 .param("clientId", query.clientId())
                 .param("authorId", query.authorId())
                 .param(
@@ -179,10 +180,13 @@ public class InteractionRepository {
     }
 
     /**
-     * @param teamId {@code null} only for a caller at {@code ALL} scope who asked for no team
+     * @param teamIds the teams in the caller's scope; empty only for a caller at {@code ALL} scope
+     *     who named no team. It is a set because RB-BR-02's {@code TEAM} is a set — a supervisor may
+     *     cover two branches — and an empty list must never be built from a scope that failed to
+     *     resolve, because here it means "no filter".
      */
     public record FeedQuery(
-            UUID teamId,
+            List<UUID> teamIds,
             UUID clientId,
             UUID authorId,
             List<InteractionType> types,
@@ -191,6 +195,7 @@ public class InteractionRepository {
             Cursor cursor) {
 
         public FeedQuery {
+            teamIds = teamIds == null ? List.of() : List.copyOf(teamIds);
             types = types == null ? List.of() : List.copyOf(types);
         }
     }
@@ -216,7 +221,8 @@ public class InteractionRepository {
                                 OR ticket_assignee_id = CAST(:assigneeId AS uuid))
                            AND (CAST(:clientId AS uuid) IS NULL OR client_id = CAST(:clientId AS uuid))
                            -- V6: the team's queue, which no amount of REST could answer before.
-                           AND (CAST(:teamId AS uuid) IS NULL OR client_team_id = CAST(:teamId AS uuid))
+                           AND (CAST(:teamIds AS uuid[]) IS NULL
+                                OR client_team_id = ANY (CAST(:teamIds AS uuid[])))
                            AND (CAST(:statuses AS text[]) IS NULL
                                 OR ticket_status::text = ANY (CAST(:statuses AS text[])))
                            -- With no explicit status the queue is what is still open. A closed
@@ -243,7 +249,7 @@ public class InteractionRepository {
                         """)
                 .param("assigneeId", query.assigneeId())
                 .param("clientId", query.clientId())
-                .param("teamId", query.teamId())
+                .param("teamIds", uuidArray(query.teamIds()))
                 .param(
                         "statuses",
                         query.statuses().isEmpty()
@@ -596,7 +602,7 @@ public class InteractionRepository {
     public record TicketQuery(
             UUID assigneeId,
             UUID clientId,
-            UUID teamId,
+            List<UUID> teamIds,
             List<TicketStatus> statuses,
             TicketPriority priority,
             boolean breachedOnly,
@@ -606,6 +612,7 @@ public class InteractionRepository {
             boolean viewerIsAdmin) {
 
         public TicketQuery {
+            teamIds = teamIds == null ? List.of() : List.copyOf(teamIds);
             statuses = statuses == null ? List.of() : List.copyOf(statuses);
         }
     }
@@ -649,5 +656,13 @@ public class InteractionRepository {
         public TimelineQuery {
             types = types == null ? List.of() : List.copyOf(types);
         }
+    }
+    /**
+     * {@code null} for an empty set, because the predicates above read a NULL array as "no team
+     * filter". Only a caller at {@code ALL} scope may reach that; a {@code TEAM} caller whose scope
+     * could not be resolved is refused in the service, never passed through as an empty set.
+     */
+    private static UUID[] uuidArray(List<UUID> ids) {
+        return ids == null || ids.isEmpty() ? null : ids.toArray(UUID[]::new);
     }
 }

@@ -48,6 +48,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 public abstract class AbstractInteractionIntegrationTest {
 
     protected static final UUID TEAM_RWN = UUID.fromString("7a000000-0000-4000-8000-000000000001");
+
+    /** The second branch, for the TEAM scope that spans more than one (RB-BR-02). */
+    protected static final UUID TEAM_RWS = UUID.fromString("7a000000-0000-4000-8000-000000000002");
+
     protected static final UUID OLA_WISNIEWSKA = UUID.fromString("3f000000-0000-4000-8000-000000000001");
     protected static final UUID ADAM_NOWAK = UUID.fromString("3f000000-0000-4000-8000-000000000002");
     protected static final UUID MARTA_LEWANDOWSKA = UUID.fromString("3f000000-0000-4000-8000-000000000003");
@@ -63,6 +67,12 @@ public abstract class AbstractInteractionIntegrationTest {
 
     /** When set, the doubled client-service refuses the next access check the way ER-01 requires. */
     protected static volatile boolean clientInScope = true;
+
+    /**
+     * What the doubled {@code GET /internal/me/teams} answers for a caller at {@code TEAM} scope.
+     * A set, because RB-BR-02's TEAM is a set: a supervisor may cover two branches.
+     */
+    protected static volatile java.util.Set<UUID> scopeTeams = java.util.Set.of(TEAM_RWN);
 
     static {
         POSTGRES.start();
@@ -96,6 +106,9 @@ public abstract class AbstractInteractionIntegrationTest {
         jdbc.sql("DELETE FROM interaction.outbox_events").update();
         jdbc.sql("DELETE FROM interaction.idempotency_keys").update();
         jdbc.sql("DELETE FROM interaction.rate_limit_counters").update();
+        clientStatus = "ACTIVE";
+        clientInScope = true;
+        scopeTeams = java.util.Set.of(TEAM_RWN);
         seedClientSchema();
     }
 
@@ -104,11 +117,39 @@ public abstract class AbstractInteractionIntegrationTest {
     }
 
     /**
-     * The {@code roles} claim reaches authorization only through {@link Doubles#accessPolicy}, a
-     * test stand-in for the seam. Production never reads a role string (RB-BR-01).
+     * A token for this user, carrying the permissions §9.2.8 actually gives that role.
+     *
+     * <p>The claim is the whole of authorization in this service: it holds no RBAC tables — one
+     * authorization authority, and it is client-service (§3.1) — so {@code TokenAccessPolicy} reads
+     * what the token says. This fixture used to be an {@code AccessPolicy} bean holding a
+     * hand-written role-to-permission map, which meant every scope assertion in this suite was
+     * checked against a copy of the matrix rather than the matrix.
+     *
+     * <p>So the claim is read from {@code client.role_permissions}, which this harness already
+     * applies (V9 runs in {@code db/migration-client}) — the same rows client-service enforces on
+     * and serves from {@code GET /permissions/matrix}. The {@code roles} claim still rides along for
+     * the event envelope's {@code actor.role}, and still reaches no decision (RB-BR-01).
      */
     protected String bearerFor(UUID userId, String role) {
-        return TestJwt.bearerFor(userId, "test." + userId + "@bank.example", "Test User", List.of(role));
+        return TestJwt.bearerFor(
+                userId, "test." + userId + "@bank.example", "Test User", List.of(role), permissionsOf(role));
+    }
+
+    /** The §9.2.8 row for one role, read rather than restated. */
+    protected Map<String, String> permissionsOf(String role) {
+        return jdbc
+                .sql("""
+                        SELECT p.code, rp.scope::text AS scope
+                          FROM client.role_permissions rp
+                          JOIN client.roles r ON r.id = rp.role_id
+                          JOIN client.permissions p ON p.id = rp.permission_id
+                         WHERE r.code = :role
+                        """)
+                .param("role", role)
+                .query((rs, n) -> Map.entry(rs.getString("code"), rs.getString("scope")))
+                .list()
+                .stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     protected int countEvents(String eventType) {
@@ -203,56 +244,6 @@ public abstract class AbstractInteractionIntegrationTest {
     @TestConfiguration
     public static class Doubles {
 
-        /**
-         * {@code MvpAccessPolicy} makes everyone a MANAGER, which cannot express IL-BR-09 or the
-         * delete and {@code includeDeleted} rules of §6.3 — each only means something when callers
-         * differ. The rows below follow the §9.2.8 matrix for the permissions this service asks.
-         */
-        @Bean
-        @Primary
-        com.client360.common.security.AccessPolicy accessPolicy() {
-            com.client360.common.security.AccessPolicy manager = new com.client360.common.security.MvpAccessPolicy();
-            java.util.Set<String> auditorAll = java.util.Set.of(
-                    com.client360.common.security.Permissions.INTERACTION_READ,
-                    com.client360.common.security.Permissions.AUDIT_READ,
-                    com.client360.common.security.Permissions.CLIENT_READ,
-                    com.client360.common.security.Permissions.TICKET_READ);
-            java.util.Set<String> managerOwn = java.util.Set.of(
-                    com.client360.common.security.Permissions.INTERACTION_READ,
-                    com.client360.common.security.Permissions.INTERACTION_WRITE,
-                    com.client360.common.security.Permissions.TICKET_READ,
-                    com.client360.common.security.Permissions.TICKET_WRITE);
-            java.util.Set<String> supervisorTeamExtra = java.util.Set.of(
-                    com.client360.common.security.Permissions.INTERACTION_DELETE,
-                    com.client360.common.security.Permissions.AUDIT_READ,
-                    com.client360.common.security.Permissions.TICKET_READ,
-                    com.client360.common.security.Permissions.TICKET_WRITE,
-                    com.client360.common.security.Permissions.INTERACTION_READ,
-                    com.client360.common.security.Permissions.INTERACTION_WRITE);
-            return (user, permission) -> {
-                if (user.roles().contains("ADMIN")) {
-                    return java.util.Optional.of(com.client360.common.security.Scope.ALL);
-                }
-                if (user.roles().contains("AUDITOR")) {
-                    return auditorAll.contains(permission)
-                            ? java.util.Optional.of(com.client360.common.security.Scope.ALL)
-                            : java.util.Optional.empty();
-                }
-                if (user.roles().contains("SUPERVISOR") && supervisorTeamExtra.contains(permission)) {
-                    return java.util.Optional.of(com.client360.common.security.Scope.TEAM);
-                }
-                // Everything §9.2.8 gives a MANAGER at OWN. MvpAccessPolicy would hand back ALL
-                // for all of them, and then every caller in every test would be a supervisor —
-                // which is exactly the distinction §6.3 draws for the cross-client feed and for
-                // raising a ticket to CRITICAL. Listed rather than inferred, because getting this
-                // wrong makes a permission test pass for the wrong reason.
-                if (managerOwn.contains(permission)) {
-                    return java.util.Optional.of(com.client360.common.security.Scope.OWN);
-                }
-                return manager.scopeOf(user, permission);
-            };
-        }
-
         @Bean
         @Primary
         ClientAccessClient clientAccessDouble() {
@@ -293,12 +284,13 @@ public abstract class AbstractInteractionIntegrationTest {
 
                 /**
                  * Everyone seeded here is on RWN, which is also the team the doubled
-                 * client-service reports for the client — so a supervisor's feed and the rows in
-                 * it agree, and a test that widens the scope has to say so explicitly.
+                 * client-service reports for the client — so a supervisor's feed and the rows in it
+                 * agree, and a test that widens the scope has to say so explicitly by adding to
+                 * {@link #scopeTeams}.
                  */
                 @Override
-                public java.util.Optional<UUID> teamOf(UUID userId) {
-                    return java.util.Optional.of(TEAM_RWN);
+                public java.util.Set<UUID> scopeTeamsOf() {
+                    return scopeTeams;
                 }
 
                 private String name(UUID id) {

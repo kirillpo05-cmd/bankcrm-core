@@ -1,6 +1,7 @@
 package com.client360.common.security;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.security.core.Authentication;
@@ -71,6 +72,31 @@ public final class CurrentUsers {
             return Optional.ofNullable(token.getToken().getExpiresAt());
         }
         return Optional.empty();
+    }
+
+    /**
+     * The {@code permissions} claim of the current request: permission code to scope name.
+     *
+     * <p>Empty when there is no token, or when the token carries no claim — a hand-minted token, or
+     * one from an issuer that predates RB-BR-05. Empty means "holds nothing", which is the only safe
+     * reading: a token that does not say what it authorizes does not authorize anything.
+     */
+    public static Map<String, String> permissionClaims() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (!(authentication instanceof JwtAuthenticationToken token)) {
+            return Map.of();
+        }
+        Object claim = token.getToken().getClaim(CLAIM_PERMISSIONS);
+        if (!(claim instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        Map<String, String> permissions = new java.util.LinkedHashMap<>();
+        map.forEach((key, value) -> {
+            if (key instanceof String code && value instanceof String scope) {
+                permissions.put(code, scope);
+            }
+        });
+        return permissions;
     }
 
     static CurrentUser fromJwt(Jwt jwt) {

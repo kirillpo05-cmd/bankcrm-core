@@ -6,7 +6,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -75,31 +75,38 @@ public class UserDirectoryClient {
     }
 
     /**
-     * The user's primary team, for the {@code TEAM} scope of the cross-client feed (IL-US-07).
+     * Every team in the caller's {@code TEAM} scope, for the cross-client feed (IL-US-07) and the
+     * team ticket queue.
      *
-     * <p>Asked of client-service rather than read from the token: team membership changes, and a
-     * claim minted hours ago would scope a supervisor's feed to a team they may have left.
+     * <p>A set, not one team. RB-BR-02 has always said "teams where the user is supervisor or an
+     * active member", and since client-service gained {@code team_members} that can be more than one:
+     * a supervisor covering two branches supervises both. This used to resolve to the single
+     * {@code primary_team_id} that {@code GET /internal/users} returns, which silently showed such a
+     * supervisor half their own book — a feed missing rows looks exactly like a quiet week.
      *
-     * @return empty when the directory is unreachable or the user has no team — the caller decides
-     *     what that means, and for a feed it means showing nothing rather than showing everything
+     * <p>Asked of client-service rather than read from the token's {@code teamIds} claim: membership
+     * changes, and a claim minted an hour ago would scope a supervisor to a team they have left.
+     *
+     * @return empty when the directory is unreachable or the caller has no team — and empty must be
+     *     read as "no team", never as "every team": a feed shows nothing rather than everything
      */
-    public Optional<UUID> teamOf(UUID userId) {
+    public Set<UUID> scopeTeamsOf() {
         try {
-            List<DirectoryUser> found = rest.get()
-                    .uri(uri -> uri.path("/api/v1/internal/users")
-                            .queryParam("ids", userId)
-                            .build())
+            ScopeView scope = rest.get()
+                    .uri("/api/v1/internal/me/teams")
                     .header(HttpHeaders.AUTHORIZATION, bearer())
                     .retrieve()
-                    .body(new ParameterizedTypeReference<List<DirectoryUser>>() {});
-            return found == null || found.isEmpty()
-                    ? Optional.empty()
-                    : Optional.ofNullable(found.getFirst().teamId());
+                    .body(ScopeView.class);
+            return scope == null || scope.teamIds() == null ? Set.of() : Set.copyOf(scope.teamIds());
         } catch (RestClientException e) {
-            log.warn("user directory unavailable while resolving a team");
-            return Optional.empty();
+            log.warn("client-service unavailable while resolving the caller's team scope");
+            return Set.of();
         }
     }
+
+    /** What {@code GET /internal/me/teams} answers. */
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    public record ScopeView(List<UUID> teamIds, UUID primaryTeamId) {}
 
     /** What {@code GET /internal/users} answers. Projected to {@link UserSummary} for responses. */
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)

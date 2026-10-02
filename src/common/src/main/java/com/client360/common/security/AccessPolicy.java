@@ -7,10 +7,14 @@ import java.util.Optional;
  * this interface "does the user hold {@code permission}, and at what scope?" — never "is the user
  * a supervisor?".
  *
- * <p>The MVP binds {@link MvpAccessPolicy}. v2 binds an implementation backed by
- * {@code role_permissions}, {@code user_roles} and break-glass grants, and no caller changes.
- * Turning a scope into a decision about a specific client is RB-BR-02 and lives in
- * {@code client-service}, the authorization authority.
+ * <p>Two implementations, chosen by what the service owns. client-service binds
+ * {@code DatabaseAccessPolicy} and reads {@code role_permissions} and {@code user_roles} directly,
+ * because it owns them. The other two bind {@link TokenAccessPolicy} and read the access token's
+ * claims, because they must not own them (§3.1: one authorization authority). No caller knows which.
+ *
+ * <p>Turning a scope into a decision about a specific client is RB-BR-02 and lives in
+ * {@code client-service}; interaction-service asks it through {@code GET
+ * /internal/clients/{id}/access}.
  */
 public interface AccessPolicy {
 

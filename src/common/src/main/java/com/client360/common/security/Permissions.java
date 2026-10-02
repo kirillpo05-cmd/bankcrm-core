@@ -69,19 +69,10 @@ public final class Permissions {
             ACCESS_REQUEST,
             ACCESS_APPROVE);
 
-    /** The MANAGER column of §9.2.8 — every code the role holds, at any scope. */
-    public static final Set<String> MANAGER = Set.of(
-            CLIENT_READ,
-            CLIENT_WRITE,
-            PRODUCT_READ,
-            PRODUCT_SYNC,
-            INTERACTION_READ,
-            INTERACTION_WRITE,
-            TICKET_READ,
-            TICKET_WRITE,
-            TASK_READ,
-            TASK_WRITE,
-            ACCESS_REQUEST);
+    // The per-role columns of §9.2.8 are deliberately not duplicated here. They live in
+    // db/migrations/client-service/V9__permission_matrix.sql, which is what the enforcement layer
+    // reads and what GET /permissions/matrix serves, so there is nothing for a constant to drift
+    // from. MvpAccessPolicy held a copy of the MANAGER column while it stood in for those rows.
 
     private Permissions() {}
 }
