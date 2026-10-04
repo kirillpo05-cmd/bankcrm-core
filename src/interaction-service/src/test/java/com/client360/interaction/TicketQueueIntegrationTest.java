@@ -307,6 +307,81 @@ class TicketQueueIntegrationTest extends AbstractInteractionIntegrationTest {
                 .andExpect(status().isOk());
     }
 
+    /**
+     * {@code GET /internal/users/{id}/open-work} — the count client-service needs for RB-BR-07.
+     *
+     * <p>The one question that travels from client-service to this one. It is not an authorization
+     * question, which is what keeps §3.1 intact: client-service stays the single authorization
+     * authority, and this answers a number.
+     */
+    @Nested
+    class OpenWork {
+
+        @Test
+        void countsTicketsStillOnSomeonesDesk_RB_BR_07() throws Exception {
+            raise("HIGH", "First", ADAM_NOWAK);
+            raise("LOW", "Second", ADAM_NOWAK);
+            raise("LOW", "Someone else's", MARTA_LEWANDOWSKA);
+
+            openWork(ADAM_NOWAK)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.openTickets").value(2));
+            openWork(MARTA_LEWANDOWSKA).andExpect(jsonPath("$.openTickets").value(1));
+            openWork(OLA_WISNIEWSKA).andExpect(jsonPath("$.openTickets").value(0));
+        }
+
+        /**
+         * IL-EC-10: a paused SLA clock is not a closed ticket. {@code WAITING_CLIENT} still needs an
+         * owner, so it still blocks a deactivation — otherwise parking a ticket would become the way
+         * to make a leaver's workload disappear.
+         */
+        @Test
+        void aPausedTicketIsStillOpen_IL_EC_10() throws Exception {
+            String id = raise("HIGH", "Parked", ADAM_NOWAK);
+            // IL-BR-08: a ticket pauses from IN_PROGRESS, not straight out of NEW.
+            move(id, """
+                    {"status":"IN_PROGRESS"}""");
+            move(id, """
+                    {"status":"WAITING_CLIENT"}""");
+            openWork(ADAM_NOWAK).andExpect(jsonPath("$.openTickets").value(1));
+        }
+
+        @Test
+        void aResolvedTicketIsNotOpen_RB_BR_07() throws Exception {
+            String id = raise("HIGH", "Done", ADAM_NOWAK);
+            move(id, """
+                    {"status":"IN_PROGRESS"}""");
+            move(id, """
+                    {"status":"RESOLVED","resolutionNote":"Explained the rate change and sent the summary"}""");
+            openWork(ADAM_NOWAK).andExpect(jsonPath("$.openTickets").value(0));
+        }
+
+        @Test
+        void requiresTicketRead_9_2_8() throws Exception {
+            mvc.perform(get("/api/v1/internal/users/{id}/open-work", ADAM_NOWAK)
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(ADAM_NOWAK, "AUDITOR")))
+                    .andExpect(status().isOk());
+            // A token carrying no permissions claim authorizes nothing here (RB-BR-05).
+            mvc.perform(get("/api/v1/internal/users/{id}/open-work", ADAM_NOWAK)
+                            .header(
+                                    HttpHeaders.AUTHORIZATION,
+                                    TestJwt.bearerFor(
+                                            ADAM_NOWAK, "a@bank.example", "Adam", java.util.List.of("ADMIN"))))
+                    .andExpect(status().isForbidden());
+        }
+
+        @Test
+        void requiresAuthentication_9_3() throws Exception {
+            mvc.perform(get("/api/v1/internal/users/{id}/open-work", ADAM_NOWAK))
+                    .andExpect(status().isUnauthorized());
+        }
+
+        private org.springframework.test.web.servlet.ResultActions openWork(UUID userId) throws Exception {
+            return mvc.perform(get("/api/v1/internal/users/{id}/open-work", userId)
+                    .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")));
+        }
+    }
+
     private String raise(String priority, String subject, UUID assigneeId) throws Exception {
         String json = """
                 {"type":"TICKET","direction":"INTERNAL","subject":"%s","body":"Details.",
