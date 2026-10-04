@@ -29,6 +29,42 @@ public record AuditQuery(
     }
 
     /**
+     * The filter as one line, for the self-audit entry a search writes about itself (AT-BR-10).
+     *
+     * <p>Identifiers and ranges only, because that is all a filter is here — there is no free-text
+     * field to leak. What it deliberately does not carry is the result: an audit of a search must
+     * not become a second copy of the thing searched (AT-BR-04).
+     */
+    public String summary() {
+        List<String> parts = new java.util.ArrayList<>();
+        if (clientId != null) {
+            parts.add("clientId=" + clientId);
+        }
+        if (actorId != null) {
+            parts.add("actorId=" + actorId);
+        }
+        if (entityType != null) {
+            parts.add("entityType=" + entityType);
+        }
+        if (entityId != null) {
+            parts.add("entityId=" + entityId);
+        }
+        if (!actions.isEmpty()) {
+            parts.add("action=" + String.join("|", actions));
+        }
+        if (service != null) {
+            parts.add("service=" + service);
+        }
+        if (from != null) {
+            parts.add("from=" + from);
+        }
+        if (to != null) {
+            parts.add("to=" + to);
+        }
+        return parts.isEmpty() ? "none" : String.join(" ", parts);
+    }
+
+    /**
      * AT-EC-14: seven years of log is not something to walk because a filter was left empty.
      *
      * <p>An identifier is enough on its own — it bounds the result by construction. A time range

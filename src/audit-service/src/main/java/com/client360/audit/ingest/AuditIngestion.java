@@ -65,7 +65,11 @@ public class AuditIngestion {
     }
 
     @KafkaListener(
-            topics = {"client.events", "interaction.events", "task.events", "auth.events"},
+            // audit.events is this service's own (§2, AT-BR-10): a read of the log is published and
+            // consumed back, so it reaches audit_log by the same path as everyone else's events and
+            // never by a direct insert (AT-BR-02). Storing an event is not reading one, so there is
+            // no loop to guard against.
+            topics = {"client.events", "interaction.events", "task.events", "auth.events", "audit.events"},
             groupId = "audit-service.ingest")
     @Transactional
     public void onEvent(ConsumerRecord<String, String> record) {

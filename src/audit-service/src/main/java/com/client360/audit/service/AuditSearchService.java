@@ -63,11 +63,14 @@ public class AuditSearchService {
     private final JdbcClient jdbc;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
+    private final AuditEvents events;
 
-    public AuditSearchService(JdbcClient jdbc, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public AuditSearchService(
+            JdbcClient jdbc, AccessPolicy accessPolicy, ObjectMapper objectMapper, AuditEvents events) {
         this.jdbc = jdbc;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
+        this.events = events;
     }
 
     @Transactional(readOnly = true)
@@ -118,6 +121,9 @@ public class AuditSearchService {
         String nextCursor = hasMore && !page.isEmpty()
                 ? new Cursor(page.getLast().occurredAt(), page.getLast().id()).encode()
                 : null;
+        // AT-BR-10: watching the watchers. Through the outbox and back around the broker, never by
+        // inserting here — that would be the direct write path AT-BR-02 exists to deny.
+        events.searched(caller, query.summary(), page.size());
         return new KeysetPage<>(page, nextCursor, hasMore);
     }
 

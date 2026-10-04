@@ -49,6 +49,11 @@ class HashChainTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.flyway.enabled", () -> "false");
         registry.add("spring.kafka.bootstrap-servers", () -> "localhost:1");
+        // Self-audit writes outbox rows (AT-BR-10) and the relay would spend the suite
+        // failing to reach a broker. Events are asserted where rule 3 puts them — in
+        // outbox_events, in the same transaction as the read — and publishing is the
+        // relay's own concern.
+        registry.add("client360.outbox.relay.enabled", () -> "false");
         // SecurityConfig refuses to start without a verification key, and rightly so.
         registry.add("client360.security.jwt.public-key", TestKeys::publicKeyPem);
     }

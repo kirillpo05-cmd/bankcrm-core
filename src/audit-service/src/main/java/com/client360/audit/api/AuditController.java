@@ -1,5 +1,6 @@
 package com.client360.audit.api;
 
+import com.client360.audit.service.AuditEvents;
 import com.client360.audit.service.AuditSearchService;
 import com.client360.audit.service.HealthService;
 import com.client360.audit.verify.ChainVerifier;
@@ -37,13 +38,19 @@ public class AuditController {
     private final ChainVerifier verifier;
     private final HealthService health;
     private final AccessPolicy accessPolicy;
+    private final AuditEvents events;
 
     public AuditController(
-            AuditSearchService search, ChainVerifier verifier, HealthService health, AccessPolicy accessPolicy) {
+            AuditSearchService search,
+            ChainVerifier verifier,
+            HealthService health,
+            AccessPolicy accessPolicy,
+            AuditEvents events) {
         this.search = search;
         this.verifier = verifier;
         this.health = health;
         this.accessPolicy = accessPolicy;
+        this.events = events;
     }
 
     /**
@@ -94,7 +101,19 @@ public class AuditController {
             // applied to verification rather than to search).
             throw ApiException.validation("chainId", "a chain or a time range is required");
         }
-        return verifier.verify(query.chainId(), query.fromSeq(), query.toSeq(), query.from(), query.to());
+        ChainVerifier.VerificationReport report =
+                verifier.verify(query.chainId(), query.fromSeq(), query.toSeq(), query.from(), query.to());
+        // AT-BR-10. Recorded whatever the verdict: a run that found a break and a run that found
+        // nothing are equally interesting, and only one of them is good news.
+        events.verified(
+                caller,
+                report.verified(),
+                report.rowsChecked(),
+                report.breaks().stream()
+                        .map(ChainVerifier.Break::diagnosis)
+                        .distinct()
+                        .toList());
+        return report;
     }
 
     /**
