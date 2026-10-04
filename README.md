@@ -21,8 +21,8 @@ compliance as it happens, not reconstructed afterwards.
 |---|---|---|
 | **Client Profile** — customer card, KYC, products, ownership | MVP | Built |
 | **Interaction Log** — timeline, corrections, tickets, attachments | MVP | Built |
-| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Ingestion, the hash chain, verification and search built; exports, scheduled partitioning and retention outstanding |
-| **RBAC** — permission + scope, break-glass grants | v2 | Tables, the real `AccessPolicy`, authentication and `GET /me` built; user and team administration and break-glass grants outstanding |
+| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Ingestion, the hash chain, verification, search, the self-audit and retention built; CSV/JSONL exports outstanding |
+| **RBAC** — permission + scope, break-glass grants | v2 | Built |
 | **Task / Reminder** — follow-ups, escalation, SLA dashboard | v3 | Not started |
 
 `SPEC.md` is the contract for all five: data models, API shapes, business rules and edge cases,
@@ -117,6 +117,10 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `GET` `/internal/clients/{id}/access` · `/internal/users` · `/internal/me/teams` | what other services authorize against |
 | `POST` `/auth/login` · `/auth/refresh` · `/auth/logout` · `/auth/logout-all` | sessions; refresh tokens rotate and a reused one revokes the family |
 | `GET` `/me` · `GET` `/permissions/matrix` | effective permissions with scopes, and the matrix read from the rows enforcement uses |
+| `POST`/`GET` `/access-grants` · `POST` `/access-grants/{id}/approve` · `/revoke` | break-glass: one client, 8 hours maximum, a second person approves, every read counted |
+| `GET`/`POST` `/users` · `GET`/`PATCH` `/users/{id}` | scoped directory, invitation-style create, optimistic-locked edits |
+| `POST`/`DELETE` `/users/{id}/roles` · `/deactivate` · `/reactivate` · `/unlock` | role changes with a mandatory reason; deactivation lists every blocker with counts |
+| `GET`/`POST` `/teams` · `PATCH` `/teams/{id}` · `POST`/`DELETE` `/teams/{id}/members` | the unit of TEAM scope, with cycle and sole-membership guards |
 
 **interaction-service** — `/api/v1`
 
@@ -127,6 +131,7 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `POST` `/interactions/{id}/corrections` | the only remedy after the window closes |
 | `POST`/`GET`/`DELETE` `/interactions/{id}/attachments` | up to 5 per interaction, streamed to object storage |
 | `GET` `/interactions` · `GET` `/tickets` | the cross-client feed and the ticket queue, keyset-paginated |
+| `GET` `/internal/users/{id}/open-work` | what a leaver still has assigned, for RB-BR-07's deactivation blockers |
 | `PATCH` `/interactions/{id}/ticket` | the IL-BR-08 state machine, including the SLA pause |
 
 **audit-service** — `/api/v1/audit`
@@ -139,10 +144,13 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 
 There is no write endpoint, and there must never be one: entries are created solely by consuming
 Kafka, so a compromised application service cannot forge one without also compromising the broker.
+That holds for the service's own events too — reading the log is audited, and the entry goes out
+through the outbox to `audit.events` and comes back through the same consumer, so audit-service has
+no more privilege over the log than anyone else.
 
 ## Testing
 
-467 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+582 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
@@ -187,8 +195,9 @@ you: the temporal triggers, and why clients are not in the SQL seed.
 ## Status
 
 Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built.
-Outstanding: the user, team and break-glass endpoints of §9.3, audit exports and retention, and
-the whole of Task/Reminder (§7). All three services now enforce real permissions: client-service
-reads the RBAC tables it owns, and the other two read the access token's `permissions` claim, which
-is what lets there be one authorization authority and no call per check. What is built is tested and
-runs.
+Outstanding: audit CSV/JSONL exports (§8.3), the whole of Task/Reminder (§7), the password
+invitation and change flow §9.3 describes but does not endpoint, and the 27 UI screens of §5.5
+through §9.5 — there is no frontend code yet. All three services enforce real permissions:
+client-service reads the RBAC tables it owns, and the other two read the access token's
+`permissions` claim, which is what lets there be one authorization authority and no call per
+check. What is built is tested and runs.
