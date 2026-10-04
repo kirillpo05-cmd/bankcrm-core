@@ -109,7 +109,7 @@ Each service owns a separate PostgreSQL **schema** (one database instance in dev
 | `interaction.events` | interaction-service | `client_id` | 6 | 7 days | audit-service |
 | `task.events` | interaction-service | `client_id` | 6 | 7 days | audit-service, notifier (v3) |
 | `auth.events` | client-service | `user_id` | 3 | 7 days | audit-service |
-| `audit.events` | audit-service | `actor_id` | 3 | 7 days | audit-service |
+| `audit.events` | audit-service | `actor_id` (`partition_name` for a retention event, which has no actor) | 3 | 7 days | audit-service |
 | `<topic>.DLT` | consumer-side | original key | 1 | 30 days | manual triage |
 
 **Why audit-service produces a topic it consumes itself.** AT-BR-10 says reading the audit log is
@@ -2781,8 +2781,8 @@ Downloading an export emits an `EXPORT` audit event carrying the `jobId`, row co
 | AT-BR-06 | Chain heads are sealed every 1 000 rows into `audit_chain_head` and mirrored nightly to external WORM storage. Local recomputation alone cannot defeat detection, because the external head is outside the database an attacker would have compromised. |
 | AT-BR-07 | `occurred_at` comes from the producer, `recorded_at` from the consumer. Both are stored. Their difference is the pipeline lag, exposed per row as `lagMs`, so a delayed audit is visible as delayed rather than silently back-dated. |
 | AT-BR-08 | Events that fail processing after 5 attempts go to the DLT and raise an alert. **The consumer does not skip them** — the offset is not committed past an unprocessable event without an operator decision, because a silently dropped audit event is exactly the failure this module exists to prevent. |
-| AT-BR-09 | Retention is 7 years, aligned to banking record-keeping. Expired partitions are **detached and archived**, never `DROP`ped in place, and the archival operation is itself audited. |
-| AT-BR-10 | Reading the audit log is audited. `GET /audit`, `GET /audit/exports/{id}` downloads, and verification runs all emit their own entries — through the `audit.events` topic (§3.2), never by inserting directly, which AT-BR-02 forbids. **Not yet implemented:** the endpoints work and the self-audit does not. It is stated here rather than approximated with a direct insert, because an insert would quietly undo the property AT-BR-02 is there for. |
+| AT-BR-09 | Retention is 7 years, aligned to banking record-keeping. Expired partitions are **detached and archived**, never `DROP`ped in place, and the archival operation is itself audited — one event per partition, not one per run, because "which window left the log, and when" is the question a regulator asks and a batch event cannot answer it. A partition straddling the cutoff stays: it holds rows still inside retention. A detached partition keeps its immutability trigger and its rows under its own name until the archival step has copied them out, so nothing is unmodifiable-but-gone in between, and `audit_partition_archive` records where each one went. The detach event is the **one event in the system with no actor**: a scheduled job ran it, and naming a person would make the log claim someone did. `ck_audit_actor_present` was widened for exactly that case rather than leaving the one operation that removes evidence as the one operation with no record. |
+| AT-BR-10 | Reading the audit log is audited. `GET /audit` and verification runs emit their own entries — through the `audit.events` topic (§3.2), never by inserting directly, which AT-BR-02 forbids: the service writes an outbox row, the relay publishes it, and the same consumer that stores everyone else's events stores this one. It therefore has no more privilege over `audit_log` than any other producer, including over its own events. The cost is that a self-audit entry appears a moment after the read rather than within it, which is the right trade: a slightly late entry that cannot be forged beats a prompt one that can. A **refused** read writes no such entry — nothing was disclosed — and the denial is audited by the service that refused it (AT-BR-12). Export download events join this when exports ship. |
 | AT-BR-11 | Managers have no audit access at all. Supervisors are limited to `TEAM` scope on clients and to their own team's actors. Auditors get read-only `ALL`. Admins get `ALL` plus verification, but **not** the ability to delete — no role in the system can delete an audit row. |
 | AT-BR-12 | `PERMISSION_DENIED` events are audited with the full attempted request. A failed access attempt is more interesting to an investigator than a successful one, so it must never be dropped as noise. |
 | AT-BR-13 | Break-glass reads carry the `access_grant_id` and the stated reason in `context`, so a `READ_SENSITIVE` outside normal scope is self-explaining in the log without a join into another service. |
@@ -3270,13 +3270,13 @@ The SPA builds its entire navigation from `permissions`. No role strings are har
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| `GET` | `/users` | `user:read` | `?status=&teamId=&role=&q=`, offset-paginated. Supervisors see their team only |
-| `POST` | `/users` | `user:write` | `201`. `409 USER_DUPLICATE_EMAIL` / `USER_DUPLICATE_EMPLOYEE_NO`. Password is set via an emailed one-time link, never in the request |
+| `GET` | `/users` | `user:read` | `?status=&teamId=&role=&q=`, offset-paginated, `?sort=` from `fullName`, `employeeNo`, `email`, `createdAt`, `lastLoginAt`. Supervisors see their own teams only — the set of them (RB-BR-02), not just their primary one. A user with no primary team, such as an admin or an auditor, is visible at `ALL` scope only |
+| `POST` | `/users` | `user:write` | `201`. `409 USER_DUPLICATE_EMAIL` / `USER_DUPLICATE_EMPLOYEE_NO`. Password is set via an emailed one-time link, never in the request — until that invitation flow exists the row is created with a random unusable hash and `must_change_password`, so the account exists and cannot be signed into |
 | `GET` | `/users/{id}` | `user:read` | `404 USER_NOT_FOUND` out of scope |
 | `PATCH` | `/users/{id}` | `user:write` | `If-Match`. `422` when changing `primaryTeamId` while the user owns clients in the old team |
 | `POST` | `/users/{id}/roles` | `role:assign` | Body `{ "roleCode": "SUPERVISOR", "reason": "…", "expiresAt": null }`. `422 BUSINESS_RULE_VIOLATED` on self-assignment (RB-BR-06) |
-| `DELETE` | `/users/{id}/roles/{roleCode}` | `role:assign` | `?reason=`. `422` when removing the last role, or the last remaining admin (RB-BR-07) |
-| `POST` | `/users/{id}/deactivate` | `user:write` | Body `{ "reason": "…", "reassignClientsTo": "4a2d…", "reassignTasksTo": "4a2d…" }`. `409 USER_HAS_OWNED_CLIENTS` when reassignment targets are missing; the response lists the counts blocking it |
+| `DELETE` | `/users/{id}/roles/{roleCode}` | `role:assign` | `?reason=` (at least 10 characters, RB-BR-14). `422` when removing the user's last role, or the last active admin (RB-BR-08). Removing a role the user does not hold is `200` with the unchanged list, so a retry converges (RB-EC-06) |
+| `POST` | `/users/{id}/deactivate` | `user:write` | Body `{ "reason": "…", "reassignClientsTo": "4a2d…", "reassignTasksTo": "4a2d…" }`. `409 USER_HAS_OWNED_CLIENTS` when reassignment targets are missing; the response lists every blocker with its count. The handover runs in the same transaction as the deactivation, so a user cannot end up deactivated with their book unmoved (CP-EC-06). `reassignClientsTo` must be an active user **with a primary team**, since `clients.team_id` is derived from it (CP-BR-03) |
 | `POST` | `/users/{id}/reactivate` | `user:write` | Restores `ACTIVE`, forces a password change, grants no clients back automatically |
 | `POST` | `/users/{id}/unlock` | `user:write` | Clears `locked_until` and `failed_login_count` |
 
@@ -3288,9 +3288,9 @@ The SPA builds its entire navigation from `permissions`. No role strings are har
 |---|---|---|---|
 | `GET` | `/teams` | `user:read` | Includes member counts |
 | `POST` | `/teams` | `team:manage` | `409 TEAM_DUPLICATE_CODE` |
-| `PATCH` | `/teams/{id}` | `team:manage` | `422` when setting a supervisor who lacks the `SUPERVISOR` role, or when `parentTeamId` would create a cycle |
+| `PATCH` | `/teams/{id}` | `team:manage` | `If-Match`. `422` when setting a supervisor who lacks the `SUPERVISOR` role, or when `parentTeamId` would create a cycle at any depth. The supervisor check reads a role name, which rule 5 forbids for **authorization**: that rule is about the caller, and this is a statement about the target — "the person you are naming as supervisor must be one" cannot be expressed as a permission the acting subject holds |
 | `POST` | `/teams/{id}/members` | `team:manage` | `422` when the user's only membership is being removed |
-| `DELETE` | `/teams/{id}/members/{userId}` | `team:manage` | Sets `left_at`; `422` while the user owns clients in that team |
+| `DELETE` | `/teams/{id}/members/{userId}` | `team:manage` | Sets `left_at`; `422` while the user owns clients in that team, and `422` when it is their only membership — a user in no team has no `TEAM` scope and cannot be assigned a client at all (CP-BR-03). Removing a membership that already ended is `204`, so a retry converges |
 
 ---
 
@@ -3322,6 +3322,35 @@ The SPA builds its entire navigation from `permissions`. No role strings are har
 ##### `GET /access-grants`
 
 `?userId=&clientId=&active=true` — the supervisor's approval queue and the compliance review list.
+Listing your **own** grants needs only `access:request`, because S-RB-04 has to show a requester the
+status of what they asked for; listing anyone else's needs `access:approve`, and at `TEAM` scope is
+limited to grants on the caller's own team's clients. A scope that resolves to no team returns an
+empty queue, never every queue.
+
+##### Status, and the window
+
+`status` is **derived, never stored** — a stored status would be a fourth fact able to disagree with
+the three timestamps it comes from, and it would need a job to keep current:
+
+| Status | Condition |
+|---|---|
+| `PENDING_APPROVAL` | not approved, not revoked, inside the window |
+| `ACTIVE` | approved, not revoked, inside the window |
+| `DENIED` | revoked **before** it was ever approved — S-RB-04's `denied` state |
+| `REVOKED` | revoked after approval — released early, by the approver or by the requester |
+| `EXPIRED` | the window closed with nobody acting |
+
+`expires_at` is measured from `requested_at`, not from the approval: `ck_ag_window` compares those
+two, so a slow approval shortens the access it grants rather than starting a fresh eight hours after
+the emergency has passed. The requester is told `expiresAt` in the `201`.
+
+`use_count` counts **actions taken** under a grant — a card read, an authorization answered for
+another service immediately before it acts — not authorization checks, which run speculatively in
+places and would turn the number into noise. It is what makes a pattern of repeated break-glass on
+one client visible in S-RB-05's history (AT-BR-13).
+
+The requester may always revoke their own grant: S-RB-04's **Release access** is the honest way to
+stop holding access you no longer need, and nobody should need permission for that.
 
 ---
 
@@ -3338,10 +3367,10 @@ Returns roles × permissions × scopes, read from `role_permissions` — the sam
 | RB-BR-01 | Authorization is `permission + scope`, never a role string. Application code asks "does this user hold `client:write` covering client X?", never "is this user a supervisor?". Roles exist only as bundles of permissions. |
 | RB-BR-02 | **Scope resolution.** `OWN` → `clients.owner_manager_id = :userId`. `TEAM` → `clients.team_id IN (teams where the user is supervisor or an active member)`. `ALL` → unrestricted. Non-client entities inherit the scope of their client: an interaction is in scope exactly when its client is. |
 | RB-BR-03 | A user holding several roles gets the **union** of permissions and, for any shared permission, the **widest** scope. A manager who is also an auditor reads all clients and writes only their own. |
-| RB-BR-04 | An active break-glass grant widens `client:read`, `client:write`, `interaction:*` and `task:*` for that one client, for its window only. It never widens `client:delete`, `client:merge`, `*:reassign` or any audit permission — break-glass is for continuity of service, not for privilege escalation. |
+| RB-BR-04 | An active break-glass grant widens `client:read`, `client:write`, `interaction:read`, `interaction:write`, `ticket:read`, `ticket:write`, `task:read` and `task:write` for that one client, for its window only — an **allow list**, so a permission code added to the matrix later is not grantable until someone decides it should be. It never widens `client:delete`, `client:merge`, `*:reassign`, `interaction:delete`, `access:approve` or any audit permission: break-glass is for continuity of service, and destroying or reassigning someone else's records, or approving your own access, is not continuity. A grant also only ever *widens* — it extends a permission the caller already holds at some scope to cover one more client, and never hands out a permission their roles do not grant. |
 | RB-BR-05 | The access token carries `userId`, `roles`, `permissions` with scopes, `teamIds` and `grantIds`. It lives 15 minutes, so a revocation takes effect within 15 minutes at worst, and immediately on the next refresh. In `client-service` the bound is tighter than that and needs no denylist: `AccessPolicy` resolves permission and scope from `user_roles` per request and requires `users.status = 'ACTIVE'`, so a deactivation or a role change ends access on the **next request**, not within 60 seconds. The token's claims are the fallback for the two services that hold no RBAC tables, where the 15-minute lifetime is the bound. |
 | RB-BR-06 | **No self-elevation.** A user cannot grant themselves a role, approve their own break-glass request, or approve KYC on a client they own (CP-BR-05). Enforced at request time by comparing the acting subject with the target, so holding `role:assign` is not enough. |
-| RB-BR-07 | **Referential safety on deactivation.** Deactivation is refused while the user owns clients, is assigned open tasks, is the assignee of open tickets, or is the sole supervisor of a team. The `409` response enumerates each blocker with counts and a deep link, so the admin can clear them in one pass. This is what makes `ON DELETE RESTRICT` on `owner_manager_id` a safety net rather than a wall. |
+| RB-BR-07 | **Referential safety on deactivation.** Deactivation is refused while the user owns clients, is assigned open tasks, is the assignee of open tickets, or is the sole supervisor of a team. The `409` response enumerates each blocker with counts and a deep link, so the admin can clear them in one pass. This is what makes `ON DELETE RESTRICT` on `owner_manager_id` a safety net rather than a wall. Open tickets live in `interaction-service`, so the count comes from `GET /internal/users/{id}/open-work` there; if that call fails the deactivation is refused with `503` rather than allowed, because a deactivation that proceeded on an unknown count would strand tickets with an assignee who no longer exists. Open **tasks** join the answer when Task/Reminder ships (§7) — they are absent from it rather than reported as zero, so a blocker cannot silently read "none" because its module does not exist yet. |
 | RB-BR-08 | At least one `ACTIVE` user with the `ADMIN` role must exist at all times. Removing the last admin role or deactivating the last admin returns `422 BUSINESS_RULE_VIOLATED`. A system nobody can administer is unrecoverable. |
 | RB-BR-09 | Break-glass requires a second person: the requester and the approver are always different users, the reason is at least 20 characters, and the window never exceeds 8 hours (DB constraint). Every read under a grant records `access_grant_id` in the audit `context` (AT-BR-13). |
 | RB-BR-10 | Refresh tokens rotate on every use and are tracked by `family_id`. Presenting an already-used token means the token was stolen, so the whole family is revoked and the user is signed out everywhere. |
