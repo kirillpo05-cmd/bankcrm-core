@@ -243,12 +243,29 @@ public class ClientEvents {
      * @param disclosure what was shown, e.g. {@code "client.card"} or {@code "lookup.existence"}
      */
     public void readSensitive(UUID clientId, String disclosure) {
+        readSensitive(clientId, disclosure, null);
+    }
+
+    /**
+     * @param grant the break-glass grant that authorized this read, or {@code null} for an ordinary
+     *     in-scope one. AT-BR-13: a disclosure outside normal scope carries the grant id and the
+     *     stated reason, so the log explains itself without a join into another service — an
+     *     auditor reading a {@code READ_SENSITIVE} on a client the actor does not own should not
+     *     have to go looking for why it was allowed.
+     */
+    public void readSensitive(
+            UUID clientId, String disclosure, com.client360.client.persistence.AccessGrantRepository.Grant grant) {
         append(
                 clientId,
                 events.event("client.read_sensitive", ENTITY, clientId)
                         .clientId(clientId)
                         .action("READ_SENSITIVE")
                         .context("disclosure", disclosure)
+                        .context("accessGrantId", grant == null ? null : grant.id())
+                        // Staff free text about why access was needed, not client data (AR-01 is
+                        // about the customer's details, and this is the requester's account of
+                        // themselves). It is the whole point of recording the grant.
+                        .context("accessGrantReason", grant == null ? null : grant.reason())
                         .build());
     }
 

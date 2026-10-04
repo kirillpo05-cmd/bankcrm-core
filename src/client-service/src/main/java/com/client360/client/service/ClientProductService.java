@@ -169,7 +169,7 @@ public class ClientProductService {
     private Client readableClient(UUID clientId, CurrentUser caller) {
         Client client = clients.findById(clientId).orElseThrow(ClientAccess::notFound);
         access.scopeOf(caller, CLIENT_READ)
-                .filter(scope -> access.covers(scope, client, caller))
+                .filter(scope -> access.covers(scope, client, caller, CLIENT_READ))
                 .orElseThrow(() -> {
                     events.recordDenial(clientId, CLIENT_READ);
                     return ClientAccess.notFound();
@@ -179,7 +179,7 @@ public class ClientProductService {
 
     private void requireProductWrite(Client client, CurrentUser caller) {
         boolean allowed = access.scopeOf(caller, PRODUCT_WRITE)
-                .filter(scope -> access.covers(scope, client, caller))
+                .filter(scope -> access.covers(scope, client, caller, CLIENT_READ))
                 .isPresent();
         if (!allowed) {
             events.recordDenial(client.id(), PRODUCT_WRITE);

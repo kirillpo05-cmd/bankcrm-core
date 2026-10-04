@@ -83,6 +83,29 @@ class TeamScopeIntegrationTest extends AbstractIntegrationTest {
                     .andExpect(jsonPath("$.code").value("CLIENT_NOT_FOUND"));
         }
 
+        /**
+         * The scoped list filters on the same set, so it cannot disagree with what the same caller
+         * can open. It used to filter on {@code primary_team_id} alone, which showed a supervisor
+         * covering two branches half their own book — and a list missing rows looks exactly like a
+         * quiet week.
+         */
+        @Test
+        void theScopedListCoversEveryTeamInScope_RB_BR_02() throws Exception {
+            createClient(ADAM_NOWAK, "CIF-1", "anna@example.com", "+48511234567");
+            createClient(JAN_ZIELINSKI, "CIF-2", "jan@example.com", "+48511234568");
+
+            mvc.perform(get("/api/v1/clients")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalElements").value(1));
+
+            join(TEAM_RWS, OLA_WISNIEWSKA, false);
+            mvc.perform(get("/api/v1/clients")
+                            .header(HttpHeaders.AUTHORIZATION, bearerFor(OLA_WISNIEWSKA, "SUPERVISOR")))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalElements").value(2));
+        }
+
         /** {@code /me} reports the same set the decision uses, so the screen cannot contradict the API. */
         @Test
         void meReportsTheTeamsInScope_9_3() throws Exception {

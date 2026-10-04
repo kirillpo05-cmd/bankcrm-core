@@ -38,9 +38,7 @@ class LookupRateLimitIntegrationTest extends AbstractIntegrationTest {
 
         @Test
         void refusesTheRequestPastTheLimit_RATE_LIMIT_EXCEEDED() throws Exception {
-            for (int i = 0; i < LIMIT; i++) {
-                mvc.perform(lookup("nobody" + i + "@example.com")).andExpect(status().isOk());
-            }
+            fillWindow(ADAM_NOWAK);
             mvc.perform(lookup("onemore@example.com"))
                     .andExpect(status().isTooManyRequests())
                     .andExpect(jsonPath("$.code").value("RATE_LIMIT_EXCEEDED"))
@@ -52,9 +50,7 @@ class LookupRateLimitIntegrationTest extends AbstractIntegrationTest {
         /** Per user. One manager burning their allowance must not throttle their colleagues. */
         @Test
         void theLimitIsPerUser_4_10() throws Exception {
-            for (int i = 0; i < LIMIT + 1; i++) {
-                mvc.perform(lookup("nobody" + i + "@example.com", ADAM_NOWAK));
-            }
+            fillWindow(ADAM_NOWAK);
             mvc.perform(lookup("nobody@example.com", ADAM_NOWAK)).andExpect(status().isTooManyRequests());
             mvc.perform(lookup("nobody@example.com", MARTA_LEWANDOWSKA)).andExpect(status().isOk());
         }
@@ -113,6 +109,25 @@ class LookupRateLimitIntegrationTest extends AbstractIntegrationTest {
                     .param("ts", window)
                     .update();
         }
+    }
+
+    /**
+     * Puts the caller's counter at the limit for the window that is open right now.
+     *
+     * <p>Sixty real requests would also do it, and did until this went red in CI: the burst takes a
+     * couple of seconds, the window is floored to the minute, and when the burst straddled a
+     * boundary the count restarted and the sixty-first request was allowed. The test was timing out
+     * a race rather than checking a rule. Seeding the row leaves the rule under test — the
+     * {@code ON CONFLICT} increment, the comparison, the {@code Retry-After} and the details — and
+     * removes the boundary from the question.
+     */
+    private void fillWindow(java.util.UUID subject) {
+        jdbc.sql("""
+                        INSERT INTO client.rate_limit_counters (subject, bucket, window_start, hits)
+                        VALUES (:subject, 'clients.lookup',
+                                to_timestamp(floor(extract(epoch FROM now()) / 60) * 60), :limit)
+                        ON CONFLICT (subject, bucket, window_start) DO UPDATE SET hits = :limit
+                        """).param("subject", subject.toString()).param("limit", LIMIT).update();
     }
 
     private int hits(String bucket) {

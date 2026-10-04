@@ -22,6 +22,31 @@ public class ClientConstraintErrors implements ConstraintError.Registry {
     @Override
     public Map<String, ConstraintError> constraintErrors() {
         return Map.ofEntries(
+                // User and team identity (§9.3). Unlike the client indexes below these are plain
+                // unique constraints, not partial: a user is never deleted (RB-BR-15), so an
+                // employee number is never freed, and that is the intended behaviour — reusing a
+                // leaver's number would make two people indistinguishable in years-old audit rows.
+                Map.entry(
+                        "uq_users_email",
+                        ConstraintError.conflict(
+                                ClientErrorCodes.USER_DUPLICATE_EMAIL,
+                                "A user with this email address already exists.")),
+                Map.entry(
+                        "uq_users_employee_no",
+                        ConstraintError.conflict(
+                                ClientErrorCodes.USER_DUPLICATE_EMPLOYEE_NO,
+                                "A user with this employee number already exists.")),
+                Map.entry(
+                        "uq_teams_code",
+                        ConstraintError.conflict(
+                                ClientErrorCodes.TEAM_DUPLICATE_CODE, "A team with this code already exists.")),
+                Map.entry(
+                        "ux_tm_one_primary",
+                        ConstraintError.businessRule("A user can have only one primary team at a time (CP-BR-03).")),
+                Map.entry(
+                        "ck_ur_reason",
+                        ConstraintError.businessRule("A role change needs a reason of at least 10 characters.")),
+
                 // Identity uniqueness (CP-BR-01, CP-BR-02). All three indexes are partial on
                 // deleted_at IS NULL, so an identifier frees up after erasure (CP-EC-02).
                 Map.entry(

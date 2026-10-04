@@ -198,6 +198,37 @@ public class ClientRepository {
      * side effect of a contact-details edit.
      */
     /**
+     * Hands every client this user owns to another manager, in one statement (RB-BR-07).
+     *
+     * <p>No {@code If-Match} and no per-client version check, unlike {@link #reassign}: this is not
+     * a user editing one record they were looking at, it is an administrator clearing a leaver's
+     * book, and the alternative — forty round trips, any of which can fail halfway — is how half a
+     * book ends up moved. It runs in the deactivation's transaction, so the handover and the
+     * deactivation cannot come apart.
+     *
+     * <p>{@code team_id} is re-derived from the new owner's primary team, never carried over
+     * (CP-BR-03).
+     *
+     * @return how many clients moved
+     */
+    public int reassignAllOwnedBy(UUID fromOwnerId, UUID toOwnerId, UUID toTeamId, UUID actorId) {
+        return jdbc.sql("""
+                        UPDATE clients
+                           SET owner_manager_id = :toOwner,
+                               team_id = :toTeam,
+                               updated_by = :actor,
+                               updated_at = now(),
+                               version = version + 1
+                         WHERE owner_manager_id = :fromOwner AND deleted_at IS NULL
+                        """)
+                .param("fromOwner", fromOwnerId)
+                .param("toOwner", toOwnerId)
+                .param("toTeam", toTeamId)
+                .param("actor", actorId)
+                .update();
+    }
+
+    /**
      * Marks the loser of a merge (CP-BR-10): soft-deleted, pointing at the survivor.
      *
      * <p>The row stays — audit rows and re-pointed interactions reference this id and must keep
@@ -466,7 +497,8 @@ public class ClientRepository {
     private static final String WHERE = """
             WHERE deleted_at IS NULL
               AND (CAST(:scopeOwnerId AS uuid) IS NULL OR owner_manager_id = CAST(:scopeOwnerId AS uuid))
-              AND (CAST(:scopeTeamId  AS uuid) IS NULL OR team_id          = CAST(:scopeTeamId  AS uuid))
+              AND (CAST(:scopeTeamIds AS uuid[]) IS NULL
+                   OR team_id = ANY (CAST(:scopeTeamIds AS uuid[])))
               AND (CAST(:ownerId      AS uuid) IS NULL OR owner_manager_id = CAST(:ownerId      AS uuid))
               AND (CAST(:teamId       AS uuid) IS NULL OR team_id          = CAST(:teamId       AS uuid))
               AND (CAST(:segment   AS text) IS NULL OR segment::text    = CAST(:segment   AS text))
@@ -483,7 +515,12 @@ public class ClientRepository {
     private static org.springframework.jdbc.core.simple.JdbcClient.StatementSpec bind(
             org.springframework.jdbc.core.simple.JdbcClient.StatementSpec spec, ClientSearch criteria) {
         return spec.param("scopeOwnerId", criteria.scopeOwnerId())
-                .param("scopeTeamId", criteria.scopeTeamId())
+                .param(
+                        "scopeTeamIds",
+                        criteria.scopeTeamIds() == null
+                                        || criteria.scopeTeamIds().isEmpty()
+                                ? null
+                                : criteria.scopeTeamIds().toArray(UUID[]::new))
                 .param("ownerId", criteria.ownerId())
                 .param("teamId", criteria.teamId())
                 .param(
@@ -548,7 +585,15 @@ public class ClientRepository {
             UUID teamId,
             Integer kycExpiringWithinDays,
             UUID scopeOwnerId,
-            UUID scopeTeamId) {}
+            List<UUID> scopeTeamIds) {
+
+        public ClientSearch {
+            // A set, because RB-BR-02's TEAM scope is a set: a supervisor may cover two branches.
+            // Empty must be built only by a caller who has no team filter to apply, never by one
+            // whose scope failed to resolve — here it means "no restriction".
+            scopeTeamIds = scopeTeamIds == null ? null : List.copyOf(scopeTeamIds);
+        }
+    }
 
     /**
      * A validated create, with identifiers already normalized. Normalization happens above this

@@ -64,6 +64,18 @@ public abstract class AbstractIntegrationTest {
     /** Deactivated, so RB-BR-07 and "reassign to a leaver" have something to fail against. */
     protected static final UUID BARTOSZ_BYLY = UUID.fromString("3f000000-0000-4000-8000-000000000009");
 
+    /** Everyone {@link #seedTeamsAndUsers()} creates. Anyone else in the table is a test's leftover. */
+    private static final UUID[] FIXTURE_USERS = {
+        OLA_WISNIEWSKA,
+        ADAM_NOWAK,
+        MARTA_LEWANDOWSKA,
+        PIOTR_KOWALCZYK,
+        JAN_ZIELINSKI,
+        SOFIA_ADAMSKA,
+        EWA_ZGODNOSC,
+        BARTOSZ_BYLY
+    };
+
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
             .withDatabaseName("client360")
             .withUsername("client360")
@@ -242,9 +254,18 @@ public abstract class AbstractIntegrationTest {
                             (:rws, 'Retail Warsaw South', 'RWS', 'Europe/Warsaw')
                         ON CONFLICT (id) DO NOTHING
                         """).param("rwn", TEAM_RWN).param("rws", TEAM_RWS).update();
-        // supervisor_id is part of TEAM scope (RB-BR-02), so a test that sets it must not leak
-        // into the next one.
-        jdbc.sql("UPDATE client.teams SET supervisor_id = NULL").update();
+        // supervisor_id is part of TEAM scope (RB-BR-02) and parent_team_id decides what counts
+        // as a hierarchy cycle, so a test that sets either must not leak into the next one.
+        jdbc.sql("UPDATE client.teams SET supervisor_id = NULL, parent_team_id = NULL")
+                .update();
+        // A user created by a test is that test's. Users are never deleted in production
+        // (RB-BR-15) and so were never cleaned up here, which made every count assertion depend on
+        // which tests had run first — and made a second create fail on a duplicate employee number.
+        // Clients are already gone by now, so nothing references these rows.
+        jdbc.sql("""
+                        DELETE FROM client.users
+                         WHERE id <> ALL (:fixtureIds)
+                        """).param("fixtureIds", FIXTURE_USERS).update();
         insertUser(OLA_WISNIEWSKA, "EMP-1001", "o.wisniewska@bank.example", "Ola Wiśniewska", TEAM_RWN);
         insertUser(ADAM_NOWAK, "EMP-1002", "a.nowak@bank.example", "Adam Nowak", TEAM_RWN);
         insertUser(PIOTR_KOWALCZYK, "EMP-1004", "p.kowalczyk@bank.example", "Piotr Kowalczyk", TEAM_RWS);
@@ -259,6 +280,10 @@ public abstract class AbstractIntegrationTest {
                         ON CONFLICT (id) DO UPDATE SET
                             status = 'DEACTIVATED',
                             deactivated_at = now() - INTERVAL '30 days',
+                            -- Stated, not left alone: a team-administration test moves this user
+                            -- into a team, and the next test's "how many people are in RWN" then
+                            -- counted a leaver.
+                            primary_team_id = NULL,
                             failed_login_count = 0,
                             locked_until = NULL,
                             password_changed_at = now()
@@ -267,6 +292,13 @@ public abstract class AbstractIntegrationTest {
         insertUser(JAN_ZIELINSKI, "EMP-1005", "j.zielinski@bank.example", "Jan Zieliński", TEAM_RWS);
         // Cross-team role: no primary team, which is what makes CP-BR-03 unsatisfiable for them.
         insertUser(SOFIA_ADAMSKA, "EMP-1006", "s.admin@bank.example", "Sofia Adamska", null);
+        // Teams a test created, removed last: every fixture user has just been pointed back at a
+        // fixture team, so nothing references these rows any more. Without this, "how many teams
+        // are there" depended on which tests had run first.
+        jdbc.sql("""
+                        DELETE FROM client.teams
+                         WHERE id <> ALL (:fixtureIds)
+                        """).param("fixtureIds", new UUID[] {TEAM_RWN, TEAM_RWS}).update();
     }
 
     /**

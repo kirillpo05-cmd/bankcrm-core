@@ -42,8 +42,15 @@ public class PermissionRepository {
                           FROM user_roles ur
                           JOIN role_permissions rp ON rp.role_id = ur.role_id
                           JOIN permissions p ON p.id = rp.permission_id
+                          JOIN users u ON u.id = ur.user_id
                          WHERE ur.user_id = :userId
                            AND (ur.expires_at IS NULL OR ur.expires_at > now())
+                           -- The same condition DatabaseAccessPolicy applies, for the same reason:
+                           -- a suspended or deactivated account holds no permission at any scope.
+                           -- Without it /me would list permissions the enforcement layer refuses,
+                           -- and worse, a token minted here would carry them to the two services
+                           -- that authorize from the claim.
+                           AND u.status = 'ACTIVE'
                          GROUP BY p.code
                          ORDER BY p.code
                         """)
@@ -66,8 +73,13 @@ public class PermissionRepository {
                         SELECT r.code, ur.expires_at
                           FROM user_roles ur
                           JOIN roles r ON r.id = ur.role_id
+                          JOIN users u ON u.id = ur.user_id
                          WHERE ur.user_id = :userId
                            AND (ur.expires_at IS NULL OR ur.expires_at > now())
+                           -- Held, in the sense of granting something. An administrator reading a
+                           -- deactivated user's record sees their rows through UserAdminRepository;
+                           -- this answers what the caller can currently do, which is nothing.
+                           AND u.status = 'ACTIVE'
                          ORDER BY r.code
                         """)
                 .param("userId", userId)

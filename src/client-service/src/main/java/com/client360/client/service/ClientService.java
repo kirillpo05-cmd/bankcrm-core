@@ -28,6 +28,7 @@ import com.client360.client.domain.ClientProduct;
 import com.client360.client.domain.ClientStatus;
 import com.client360.client.domain.KycStatus;
 import com.client360.client.domain.ProductStatus;
+import com.client360.client.persistence.AccessGrantRepository;
 import com.client360.client.persistence.ClientProductRepository;
 import com.client360.client.persistence.ClientRepository;
 import com.client360.client.persistence.ClientRepository.ClientSearch;
@@ -201,8 +202,10 @@ public class ClientService {
     @Transactional
     public ClientResponse read(UUID id, CurrentUser caller) {
         Client client = requireLive(clients.findById(id), id);
-        requireReadable(client, caller);
-        events.readSensitive(client.id(), "client.card");
+        Optional<AccessGrantRepository.Grant> grant = requireReadable(client, caller);
+        // AT-BR-13: a disclosure outside normal scope says so, and says which grant allowed it.
+        grant.ifPresent(access::recordGrantUse);
+        events.readSensitive(client.id(), "client.card", grant.orElse(null));
         return assembler.toResponse(client, caller, clock.now());
     }
 
@@ -302,9 +305,16 @@ public class ClientService {
         // Not holding the permission at any scope is 403, answered before the record is looked up:
         // it depends on the caller alone, so it says nothing about which clients exist (ER-01).
         // Only once the permission is held does "not this client" collapse into 404.
-        access.requireScope(caller, permission);
+        Scope scope = access.requireScope(caller, permission);
         Client client = requireLive(clients.findById(clientId), clientId);
-        requireCovering(client, caller, permission);
+        ClientAccess.Decision decision = access.authorize(scope, client, caller, permission);
+        if (!decision.allowed()) {
+            events.recordDenial(client.id(), permission);
+            throw ClientAccess.notFound();
+        }
+        // The calling service asks this immediately before acting, so a yes here is an action taken
+        // under the grant rather than a speculative check (AT-BR-13).
+        decision.byGrant().ifPresent(access::recordGrantUse);
         return new ClientAccessView(
                 client.id(),
                 client.ownerManagerId(),
@@ -452,7 +462,7 @@ public class ClientService {
                                         ErrorCodes.PERMISSION_DENIED,
                                         "Reassigning a client requires the " + CLIENT_REASSIGN + " permission.")
                                 .detail("permission", CLIENT_REASSIGN)));
-        if (!access.covers(scope, current, caller)) {
+        if (!access.covers(scope, current, caller, CLIENT_REASSIGN)) {
             events.recordDenial(current.id(), CLIENT_REASSIGN);
             throw ClientAccess.notFound();
         }
@@ -509,7 +519,7 @@ public class ClientService {
                                         ErrorCodes.ROLE_REQUIRED,
                                         "Deleting a client requires the " + CLIENT_DELETE + " permission.")
                                 .detail("permission", CLIENT_DELETE)));
-        if (!access.covers(scope, current, caller)) {
+        if (!access.covers(scope, current, caller, CLIENT_DELETE)) {
             events.recordDenial(current.id(), CLIENT_DELETE);
             throw ClientAccess.notFound();
         }
@@ -559,7 +569,7 @@ public class ClientService {
                                             "Setting KYC to " + target
                                                     + " requires the client:kyc permission (CP-BR-05).")
                                     .detail("permission", CLIENT_KYC)));
-            if (!access.covers(kycScope, current, caller)) {
+            if (!access.covers(kycScope, current, caller, CLIENT_KYC)) {
                 throw deny(current, CLIENT_KYC, outOfScope(CLIENT_KYC));
             }
             // Holding the permission is not enough: nobody approves their own client. Checked
@@ -576,7 +586,7 @@ public class ClientService {
         } else {
             // Moving to PENDING is an ordinary edit: a manager starts their own client's review.
             boolean mayWrite = access.scopeOf(caller, CLIENT_WRITE)
-                    .filter(scope -> access.covers(scope, current, caller))
+                    .filter(scope -> access.covers(scope, current, caller, CLIENT_WRITE))
                     .isPresent();
             if (!mayWrite) {
                 throw deny(current, CLIENT_WRITE, outOfScope(CLIENT_WRITE));
@@ -673,15 +683,18 @@ public class ClientService {
         Sorting sorting = parseSort(query.sort());
 
         UUID scopeOwnerId = scope == Scope.OWN ? caller.id() : null;
-        UUID scopeTeamId = null;
+        List<UUID> scopeTeamIds = null;
         if (scope == Scope.TEAM) {
-            Optional<UUID> team = access.teamOf(caller);
-            if (team.isEmpty()) {
+            // Every team in scope, not just the primary one: a supervisor covering two branches
+            // supervises both (RB-BR-02), and a list that showed one of them would disagree with
+            // what `covers` lets the same caller open.
+            Set<UUID> own = access.scopeTeamsOf(caller);
+            if (own.isEmpty()) {
                 // TEAM scope with no team resolves to nothing. Leaving the filter off would quietly
                 // widen the search to every client, which is the opposite of what the scope says.
                 return new OffsetPage<>(List.of(), page, size, 0, 0, false);
             }
-            scopeTeamId = team.get();
+            scopeTeamIds = List.copyOf(own);
         }
 
         ClientSearch criteria = new ClientSearch(
@@ -693,7 +706,7 @@ public class ClientService {
                 query.teamId(),
                 requireExpiringDays(query.kycExpiringWithinDays()),
                 scopeOwnerId,
-                scopeTeamId);
+                scopeTeamIds);
 
         long total = clients.countSearch(criteria);
         List<ClientSummaryResponse> content =
@@ -794,7 +807,7 @@ public class ClientService {
         List<ClientSummaryResponse> matches = new ArrayList<>();
         boolean disclosedOutOfScope = false;
         for (Client client : found) {
-            boolean inScope = access.covers(scope, client, caller);
+            boolean inScope = access.covers(scope, client, caller, CLIENT_READ);
             if (!inScope) {
                 // The narrow ER-01 exception covers exact identifier hits only. A name search must
                 // not become a way to enumerate other teams' clients.
@@ -840,7 +853,7 @@ public class ClientService {
      */
     private void requireCovering(Client client, CurrentUser caller, String permission) {
         Optional<Scope> scope = access.scopeOf(caller, permission);
-        if (scope.isEmpty() || !access.covers(scope.get(), client, caller)) {
+        if (scope.isEmpty() || !access.covers(scope.get(), client, caller, permission)) {
             events.recordDenial(client.id(), permission);
             throw ClientAccess.notFound();
         }
@@ -871,7 +884,7 @@ public class ClientService {
 
     private void requireFieldPermission(Client client, CurrentUser caller, Field field, String permission) {
         boolean allowed = access.scopeOf(caller, permission)
-                .filter(scope -> access.covers(scope, client, caller))
+                .filter(scope -> access.covers(scope, client, caller, permission))
                 .isPresent();
         if (!allowed) {
             throw deny(
@@ -941,13 +954,24 @@ public class ClientService {
         return value == null ? null : value.trim();
     }
 
-    /** Shared by every path that resolves a client for a caller, so ER-01 is applied once. */
-    private void requireReadable(Client client, CurrentUser caller) {
+    /**
+     * Shared by every path that resolves a client for a caller, so ER-01 is applied once.
+     *
+     * @return the break-glass grant that authorized the read, or empty when ordinary role scope did.
+     *     The caller needs it to name the grant in the audit context (AT-BR-13).
+     */
+    private Optional<AccessGrantRepository.Grant> requireReadable(Client client, CurrentUser caller) {
         Optional<Scope> scope = access.scopeOf(caller, CLIENT_READ);
-        if (scope.isEmpty() || !access.covers(scope.get(), client, caller)) {
+        if (scope.isEmpty()) {
             events.recordDenial(client.id(), CLIENT_READ);
             throw ClientAccess.notFound();
         }
+        ClientAccess.Decision decision = access.authorize(scope.get(), client, caller, CLIENT_READ);
+        if (!decision.allowed()) {
+            events.recordDenial(client.id(), CLIENT_READ);
+            throw ClientAccess.notFound();
+        }
+        return decision.byGrant();
     }
 
     /**
@@ -972,7 +996,7 @@ public class ClientService {
             // Naming the conflicting record is only safe in scope; out of scope it would leak
             // existence through a create (ER-01). The message alone still tells the caller enough.
             access.scopeOf(caller, CLIENT_READ)
-                    .filter(scope -> access.covers(scope, conflict, caller))
+                    .filter(scope -> access.covers(scope, conflict, caller, CLIENT_READ))
                     .ifPresent(scope -> error.detail("conflictingId", conflict.id()));
             throw error;
         });
