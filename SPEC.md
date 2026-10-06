@@ -2569,6 +2569,23 @@ CREATE TABLE audit_export_jobs (
 );
 ```
 
+V1 created this table before anything used it and drifted from the above in four ways — no `format`,
+no `checksum_sha256`, and `error` / `finished_at` instead of `error_message` / `completed_at`. V3
+fixes the schema rather than teaching the code two sets of names, and adds `idempotency_key`
+(below). The terminal-state constraints keep V1's names (`ck_export_terminal_pair`,
+`ck_export_failure_reason`, `ck_export_result`) because renaming a constraint changes the error
+message an operator greps for, and the predicates are equivalent.
+
+**`Idempotency-Key` is stored on the job row, not in `idempotency_keys`.** `common`'s
+`IdempotencyService` implements that header everywhere else, and it cannot be used here: it stores
+the replayed response body encrypted, so it needs the AES cipher, and AT-BR-04 means this service
+must not be able to reach one. The encryption exists because a create response elsewhere echoes
+decrypted PII; an export acknowledgement is `{ jobId, status, estimatedRows, expiresAt }`. So the
+job carries `idempotency_key` with a unique index per requester — one column instead of a second
+table, and the claim cannot drift from the job it protects, because it is the same row. The header
+is therefore **optional** here, unlike on every other create: a duplicate export makes a second copy
+of a file nobody has downloaded, which the five-an-hour limit already bounds.
+
 #### 8.2.6 `audit_consumer_state`
 
 ```sql
@@ -2782,7 +2799,7 @@ Downloading an export emits an `EXPORT` audit event carrying the `jobId`, row co
 | AT-BR-07 | `occurred_at` comes from the producer, `recorded_at` from the consumer. Both are stored. Their difference is the pipeline lag, exposed per row as `lagMs`, so a delayed audit is visible as delayed rather than silently back-dated. |
 | AT-BR-08 | Events that fail processing after 5 attempts go to the DLT and raise an alert. **The consumer does not skip them** — the offset is not committed past an unprocessable event without an operator decision, because a silently dropped audit event is exactly the failure this module exists to prevent. |
 | AT-BR-09 | Retention is 7 years, aligned to banking record-keeping. Expired partitions are **detached and archived**, never `DROP`ped in place, and the archival operation is itself audited — one event per partition, not one per run, because "which window left the log, and when" is the question a regulator asks and a batch event cannot answer it. A partition straddling the cutoff stays: it holds rows still inside retention. A detached partition keeps its immutability trigger and its rows under its own name until the archival step has copied them out, so nothing is unmodifiable-but-gone in between, and `audit_partition_archive` records where each one went. The detach event is the **one event in the system with no actor**: a scheduled job ran it, and naming a person would make the log claim someone did. `ck_audit_actor_present` was widened for exactly that case rather than leaving the one operation that removes evidence as the one operation with no record. |
-| AT-BR-10 | Reading the audit log is audited. `GET /audit` and verification runs emit their own entries — through the `audit.events` topic (§3.2), never by inserting directly, which AT-BR-02 forbids: the service writes an outbox row, the relay publishes it, and the same consumer that stores everyone else's events stores this one. It therefore has no more privilege over `audit_log` than any other producer, including over its own events. The cost is that a self-audit entry appears a moment after the read rather than within it, which is the right trade: a slightly late entry that cannot be forged beats a prompt one that can. A **refused** read writes no such entry — nothing was disclosed — and the denial is audited by the service that refused it (AT-BR-12). Export download events join this when exports ship. |
+| AT-BR-10 | Reading the audit log is audited. `GET /audit` and verification runs emit their own entries — through the `audit.events` topic (§3.2), never by inserting directly, which AT-BR-02 forbids: the service writes an outbox row, the relay publishes it, and the same consumer that stores everyone else's events stores this one. It therefore has no more privilege over `audit_log` than any other producer, including over its own events. The cost is that a self-audit entry appears a moment after the read rather than within it, which is the right trade: a slightly late entry that cannot be forged beats a prompt one that can. A **refused** read writes no such entry — nothing was disclosed — and the denial is audited by the service that refused it (AT-BR-12). `GET /audit/exports/{id}` is audited when the link is issued, which is the last moment this service sees the request — the download itself goes straight to the bucket. |
 | AT-BR-11 | Managers have no audit access at all. Supervisors are limited to `TEAM` scope on clients and to their own team's actors. Auditors get read-only `ALL`. Admins get `ALL` plus verification, but **not** the ability to delete — no role in the system can delete an audit row. |
 | AT-BR-12 | `PERMISSION_DENIED` events are audited with the full attempted request. A failed access attempt is more interesting to an investigator than a successful one, so it must never be dropped as noise. |
 | AT-BR-13 | Break-glass reads carry the `access_grant_id` and the stated reason in `context`, so a `READ_SENSITIVE` outside normal scope is self-explaining in the log without a join into another service. |
