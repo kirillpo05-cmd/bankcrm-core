@@ -71,6 +71,11 @@ class ChainVerifierTest {
         // outbox_events, in the same transaction as the read — and publishing is the
         // relay's own concern.
         registry.add("client360.outbox.relay.enabled", () -> "false");
+        // This service refuses to start without export credentials, which is right for a
+        // deployment and noise for a test that never exports. Placeholders, so the S3 client
+        // builds; AuditExportIntegrationTest points them at a real LocalStack instead.
+        registry.add("client360.audit.export.access-key", () -> "test");
+        registry.add("client360.audit.export.secret-key", () -> "test");
         // SecurityConfig refuses to start without a verification key, and rightly so.
         registry.add("client360.security.jwt.public-key", TestKeys::publicKeyPem);
     }

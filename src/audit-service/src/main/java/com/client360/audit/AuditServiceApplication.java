@@ -2,6 +2,7 @@ package com.client360.audit;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -35,6 +36,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 // widening the scan to reach one annotation and pulling CryptoConfig in with it. Without it the
 // outbox relay would never poll and the partition jobs would never run.
 @EnableScheduling
+// An export runs off the request thread (AT-EC-09): a regulatory slice can be millions of rows, and
+// a request that waits for it is a request that times out. Boot's own bounded task executor runs
+// it, so the work queues rather than spawning a thread per export.
+@EnableAsync
 @SpringBootApplication(
         scanBasePackages = {
             "com.client360.audit",
@@ -43,7 +48,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
             "com.client360.common.web",
             // Self-audit only (AT-BR-10). Nothing here writes to audit_log.
             "com.client360.common.outbox",
-            "com.client360.common.time"
+            "com.client360.common.time",
+            // §8.3's five exports an hour. Counted in the database, so it holds across replicas.
+            "com.client360.common.ratelimit"
         })
 public class AuditServiceApplication {
 

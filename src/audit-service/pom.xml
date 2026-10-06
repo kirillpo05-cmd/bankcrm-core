@@ -29,6 +29,31 @@
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
+        <!--
+          Export storage (AT-US-04, AT-EC-09). An export streams straight to the bucket with a
+          500-row fetch size and is never materialized in memory, so this service needs the S3
+          client even though it holds no attachments. The apache-client is excluded in favour of
+          the JDK's own: one HTTP stack is enough for a handful of PUTs.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>apache-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -47,6 +72,22 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          A real S3 server, for the same reason the tests use a real PostgreSQL: a doubled object
+          store would agree with whatever the code assumed about pre-signing and checksums.
+          LocalStack rather than MinIO — see interaction-service's pom for why MinIO's images
+          stopped being usable.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>localstack</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -29,6 +29,18 @@ public record AuditQuery(
     }
 
     /**
+     * No filter at all — valid for an **export** and not for a search.
+     *
+     * <p>AT-EC-14 refuses an unfiltered search because seven years of rows cannot be paged through
+     * interactively. An export is the case that legitimately wants a wide slice: it streams to a
+     * file and is bounded instead by the row ceiling and the seven-year range (§8.3). Different
+     * question, different guard.
+     */
+    public static AuditQuery unfiltered() {
+        return new AuditQuery(null, null, null, null, List.of(), null, null, null);
+    }
+
+    /**
      * The filter as one line, for the self-audit entry a search writes about itself (AT-BR-10).
      *
      * <p>Identifiers and ranges only, because that is all a filter is here — there is no free-text

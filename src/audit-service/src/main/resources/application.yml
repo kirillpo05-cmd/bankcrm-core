@@ -54,6 +54,23 @@ management:
       probes:
         enabled: true
 
+client360:
+  audit:
+    # §8.3's audit exports. The bucket is the same object store the attachments live in, under its
+    # own prefix — a second bucket would be a second thing to provision for no isolation this
+    # service needs, since nothing else writes under audit-exports/.
+    export:
+      endpoint: ${CLIENT360_S3_ENDPOINT:}
+      bucket: ${CLIENT360_AUDIT_EXPORT_BUCKET:client360-audit-exports}
+      access-key: ${S3_ACCESS_KEY:}
+      secret-key: ${S3_SECRET_KEY:}
+      # §8.3: a pre-signed link valid 15 minutes. It is not a share mechanism.
+      link-ttl: ${CLIENT360_AUDIT_EXPORT_LINK_TTL:15m}
+      # How long the file is kept before the sweeper deletes it and the job answers 410.
+      retention: ${CLIENT360_AUDIT_EXPORT_RETENTION:7d}
+      # AT-EC-09's ceiling. Past this the filter is the problem, not the export.
+      max-rows: ${CLIENT360_AUDIT_EXPORT_MAX_ROWS:5000000}
+
 logging:
   level:
     root: INFO
