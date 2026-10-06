@@ -21,7 +21,7 @@ compliance as it happens, not reconstructed afterwards.
 |---|---|---|
 | **Client Profile** — customer card, KYC, products, ownership | MVP | Built |
 | **Interaction Log** — timeline, corrections, tickets, attachments | MVP | Built |
-| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Ingestion, the hash chain, verification, search, the self-audit and retention built; CSV/JSONL exports outstanding |
+| **Audit Trail** — append-only log with a per-partition hash chain | v2 | Built |
 | **RBAC** — permission + scope, break-glass grants | v2 | Built |
 | **Task / Reminder** — follow-ups, escalation, SLA dashboard | v3 | Not started |
 
@@ -80,7 +80,7 @@ token, and `POST /auth/login` issues one:
 
 ```bash
 scripts/dev-jwt.sh keys                   # once: writes .dev/, prints two lines for .env
-docker compose --profile app up -d --build
+docker compose --profile app up -d --build   # all three services: 8080, 8081, 8082
 
 TOKEN=$(curl -s localhost:8080/api/v1/auth/login           -H 'Content-Type: application/json'           -d '{"email":"a.nowak@bank.example","password":"local-dev-only"}'         | python -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])')
 curl -s localhost:8080/api/v1/me -H "Authorization: Bearer $TOKEN"
@@ -141,6 +141,7 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `GET` `/audit` | keyset search; refuses an unfiltered query, because a 7-year scan is not a request |
 | `POST` `/audit/verify` | recomputes the hash chain; a detected break is `200` with `verified: false` |
 | `GET` `/audit/health` | consumer lag, reported as a gap rather than degrading quietly |
+| `POST`/`GET` `/audit/exports` | async CSV/JSONL export, streamed to object storage, 15-minute signed link |
 
 There is no write endpoint, and there must never be one: entries are created solely by consuming
 Kafka, so a compromised application service cannot forge one without also compromising the broker.
@@ -150,7 +151,7 @@ no more privilege over the log than anyone else.
 
 ## Testing
 
-582 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+605 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
@@ -195,9 +196,9 @@ you: the temporal triggers, and why clients are not in the SQL seed.
 ## Status
 
 Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built.
-Outstanding: audit CSV/JSONL exports (§8.3), the whole of Task/Reminder (§7), the password
-invitation and change flow §9.3 describes but does not endpoint, and the 27 UI screens of §5.5
-through §9.5 — there is no frontend code yet. All three services enforce real permissions:
+Outstanding: the whole of Task/Reminder (§7), the password invitation and change flow §9.3
+describes but does not endpoint, and the 27 UI screens of §5.5 through §9.5 — there is no frontend
+code yet. Four of the five modules are complete. All three services enforce real permissions:
 client-service reads the RBAC tables it owns, and the other two read the access token's
 `permissions` claim, which is what lets there be one authorization authority and no call per
 check. What is built is tested and runs.

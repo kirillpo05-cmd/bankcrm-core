@@ -215,7 +215,8 @@ services:
       "
       aws --endpoint-url http://s3:4566 s3api create-bucket --bucket client360-attachments 2>/dev/null || true
       aws --endpoint-url http://s3:4566 s3api put-bucket-versioning --bucket client360-attachments           --versioning-configuration Status=Enabled
-      echo 'bucket ready: client360-attachments'
+      aws --endpoint-url http://s3:4566 s3api create-bucket --bucket client360-audit-exports 2>/dev/null || true
+      echo 'buckets ready: client360-attachments, client360-audit-exports'
       "
 
   # ------------------------------------------------- Application services
@@ -292,10 +293,39 @@ services:
     ports:
       - "8081:8080"
 
-  # audit-service joins in v2 (§11.1). src/audit-service holds no module yet, so a service
-  # definition here would only break `--profile app` for everyone. Its topics are already being
-  # written: the outbox publishes from day one and the consumer arrives later, which is the whole
-  # point of the ordering.
+  # The consumer side of the whole system. It arrived after the producers, which was the point of
+  # the ordering: the outbox published from day one and nothing had to change here when the
+  # consumer appeared.
+  audit-service:
+    profiles: ["app"]
+    build:
+      context: .
+      args:
+        SERVICE: audit-service
+    container_name: client360-audit-service
+    depends_on:
+      flyway-audit:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-client360}?currentSchema=audit,public
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-client360}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-client360_local_only}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # The public half only. This service verifies tokens and issues none, and it must never be
+      # able to sign one — it is the service whose records everyone else is judged against.
+      CLIENT360_JWT_PUBLIC_KEY: ${CLIENT360_JWT_PUBLIC_KEY}
+      # Export storage (AT-US-04). No crypto key: AT-BR-04 means there is nothing here to encrypt.
+      CLIENT360_S3_ENDPOINT: http://s3:4566
+      CLIENT360_AUDIT_EXPORT_BUCKET: client360-audit-exports
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-client360}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-client360_local_only}
+    ports:
+      - "8082:8080"
 
 volumes:
   pgdata:

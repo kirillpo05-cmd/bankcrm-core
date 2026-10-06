@@ -92,8 +92,8 @@ docker compose logs flyway-client        # migration output
 docker compose down -v                   # reset everything, including data
 ```
 
-The services themselves (`client-service` on 8080, `interaction-service` on 8081;
-`audit-service` joins in v2):
+The services themselves (`client-service` on 8080, `interaction-service` on 8081,
+`audit-service` on 8082):
 
 ```bash
 scripts/dev-jwt.sh keys                  # once: RSA keypair -> paste both lines into .env
