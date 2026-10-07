@@ -102,6 +102,10 @@ public abstract class AbstractInteractionIntegrationTest {
     void resetData() {
         clientStatus = "ACTIVE";
         clientInScope = true;
+        // Tasks before interactions: fk_tasks_source is ON DELETE SET NULL, so the order is not
+        // forced, but task_history and task_reminders cascade from tasks and nothing should be
+        // left pointing at a row the next test does not expect.
+        jdbc.sql("DELETE FROM interaction.tasks").update();
         jdbc.sql("DELETE FROM interaction.interactions").update();
         jdbc.sql("DELETE FROM interaction.outbox_events").update();
         jdbc.sql("DELETE FROM interaction.idempotency_keys").update();
