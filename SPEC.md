@@ -1893,6 +1893,25 @@ Filter bar over a virtualized reverse-chronological list with day separators.
 
 **Service:** `interaction-service` · **Phase:** v3 · **Prefix:** `TR`
 
+**Built so far:** the task lifecycle — create, the scoped list with buckets, read with history, edit,
+complete, snooze, reassign and cancel — plus `tasks`, `task_reminders` and `task_history`, and
+reminder rows scheduled and rescheduled per TR-BR-07.
+
+**Not built yet,** and absent rather than stubbed so nothing reads as working when it is not:
+
+- the escalation sweep (TR-BR-08). `escalation_level` and `escalated_at` exist and are enforced by
+  constraints; nothing advances them yet, so every live task sits at level 0.
+- reminder **delivery**. Rows reach `SCHEDULED` and stay there: there is no notifier, so TR-US-07's
+  "in-app plus email" does not happen. TR-EC-14's re-check before sending belongs with it.
+- both dashboards, `GET /dashboard/overdue` (TR-US-05) and `GET /dashboard/team-summary`
+  (TR-US-08). The partial indexes TR-BR-13 relies on are in place.
+- `logInteraction` on complete. The field is **not accepted** by the endpoint rather than accepted
+  and ignored — a caller who sets it would otherwise believe a note reached the timeline.
+- automatic `KYC_REFRESH` creation from the KYC expiry job (TR-BR-10). The cancellation half of that
+  rule *is* enforced: a manager cannot cancel one.
+- TR-BR-11's wiring. `TaskService.transferLiveTasks` implements it and the `client.reassigned`
+  consumer does not call it yet, so a client handover does not move its tasks.
+
 Follow-up actions with due dates, plus the supervisor dashboard that surfaces overdue work across a team — the second half of the problem statement ("супервайзер не видит просроченные задачи по клиентам в реальном времени").
 
 ### 7.1 User stories
