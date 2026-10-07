@@ -23,7 +23,7 @@ compliance as it happens, not reconstructed afterwards.
 | **Interaction Log** — timeline, corrections, tickets, attachments | MVP | Built |
 | **Audit Trail** — append-only log with a per-partition hash chain | v2 | Built |
 | **RBAC** — permission + scope, break-glass grants | v2 | Built |
-| **Task / Reminder** — follow-ups, escalation, SLA dashboard | v3 | The task lifecycle is built; escalation, reminder delivery and the two dashboards are not |
+| **Task / Reminder** — follow-ups, escalation, SLA dashboard | v3 | Built, bar an email transport and escalation notifications |
 
 `SPEC.md` is the contract for all five: data models, API shapes, business rules and edge cases,
 each with a stable identifier (`CP-BR-03`, `IL-EC-07`) that code comments and test names cite.
@@ -134,6 +134,7 @@ Git Bash rewrites in-container paths — prefix `docker exec` with `MSYS_NO_PATH
 | `GET` `/internal/users/{id}/open-work` | what a leaver still has assigned, for RB-BR-07's deactivation blockers |
 | `POST`/`GET` `/tasks` · `GET`/`PATCH`/`DELETE` `/tasks/{id}` | follow-up work, with buckets counted over the whole filtered set |
 | `POST` `/tasks/{id}/complete` · `/snooze` · `/reassign` | an overdue completion needs a note; three snoozes, each with a reason |
+| `GET` `/dashboard/overdue` · `/team-summary` | every overdue task across a team, and who is systematically late |
 | `PATCH` `/interactions/{id}/ticket` | the IL-BR-08 state machine, including the SLA pause |
 
 **audit-service** — `/api/v1/audit`
@@ -153,7 +154,7 @@ no more privilege over the log than anyone else.
 
 ## Testing
 
-670 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
+748 tests, all against a real PostgreSQL in Testcontainers rather than an in-memory stand-in —
 the `CHECK` constraints, temporal triggers and partial indexes only behave correctly against the
 real thing. Tests are named for the rule they pin: `omitsTheTimelineForACallerWithoutInteractionRead_RB_BR_02`.
 
@@ -197,11 +198,17 @@ you: the temporal triggers, and why clients are not in the SQL seed.
 
 ## Status
 
-Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built.
-Outstanding: §7's escalation sweep, reminder delivery and the two supervisor dashboards; the
-password invitation and change flow §9.3 describes but does not endpoint; and the 27 UI screens of
-§5.5 through §9.5 — there is no frontend code yet. §7's own section lists what it does and does not
-do, item by item. All three services enforce real permissions:
+Work in progress, built spec-first with Claude Code. The MVP is complete; v2 is partly built, and
+§7 Task/Reminder is now complete bar two things.
+
+Outstanding: an **email transport** for reminders — the delivery state machine is built and `IN_APP`
+is delivered, but there is no SMTP in the stack, so an `EMAIL` reminder is recorded `FAILED` with
+`NO_TRANSPORT_CONFIGURED` rather than reported as sent; **escalation notifications**, where the
+ladder advances and publishes but names no recipient, because resolving one needs the org chart that
+interaction-service does not own; CP-BR-06's **KYC expiry sweep** and the `KYC_REFRESH` task it
+raises (TR-BR-10); the **password invitation and change flow** §9.3 describes but does not endpoint;
+and the **27 UI screens** of §5.5 through §9.5 — there is no frontend code yet. §7's own section
+lists what it does and does not do, item by item. All three services enforce real permissions:
 client-service reads the RBAC tables it owns, and the other two read the access token's
 `permissions` claim, which is what lets there be one authorization authority and no call per
 check. What is built is tested and runs.

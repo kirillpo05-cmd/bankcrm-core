@@ -133,6 +133,7 @@ Every message on every topic uses the same envelope. `payload` is event-type spe
   "occurredAt": "2026-09-09T11:42:07.113Z",
   "service": "client-service",
   "actor": {
+    "type": "USER",
     "userId": "3f1c…",
     "email": "a.ivanov@bank.example",
     "role": "MANAGER",
@@ -152,6 +153,29 @@ Every message on every topic uses the same envelope. `payload` is event-type spe
   }
 }
 ```
+
+**`actor.type` is `USER` or `SYSTEM`.** A scheduled job has no person behind it, and says so. Two
+emit today — the escalation ladder (TR-BR-08) and partition retention (AT-BR-09) — and CP-BR-06's KYC
+expiry sweep will be the third:
+
+```json
+"actor": { "type": "SYSTEM", "userId": null, "role": "task-escalation-sweep" }
+```
+
+`role` names the job and `context.job` repeats it, so "which sweep did this" is answerable from the
+audit row. A `SYSTEM` actor must carry no `userId` and no `email` (`ck_audit_system_has_no_user`): an
+id there would make the log claim a person did what a timer did.
+
+The alternative was to leave the actor null and teach `audit_log` to accept it one
+`(service, entity_type, action)` triple at a time, which is what `V2` and `V4` did. That holds until a
+job *creates* something: a `KYC_REFRESH` task emits the same `CREATE` on the same entity type a manager
+does, so the branch stops being narrow and becomes a hole. Stating the kind is both narrower and
+readable.
+
+It is deliberately **not** part of `row_hash` (§8.2.4) — changing the hash input would invalidate every
+chain already stored. It does not need to be: `actor_id` *is* hashed, and the constraint requires a
+`SYSTEM` row to have none, so relabelling a person's action as a job's means also removing their id and
+breaking the chain. The reverse leaves a `USER` row with no id, which the constraint refuses.
 
 **Rule AR-01 — no plaintext PII on the bus.** Values of fields marked *sensitive* in the data model are replaced with the literal `***MASKED***` in `changedFields`. The audit record proves *that* the field changed, by whom and when — never *to what*. Recovering old plaintext values requires a DBA-level procedure outside the application.
 
@@ -897,12 +921,19 @@ shows a stale "expires in 12 days"; leaving `REJECTED` clears the reason.
 | `404` | `USER_NOT_FOUND` | `newOwnerManagerId` unknown or deactivated |
 | `422` | `BUSINESS_RULE_VIOLATED` | New owner equals current owner; new owner has no primary team, so CP-BR-03 has nothing to derive from; new owner lacks the `MANAGER` role; `reason` under 10 characters |
 
-Two parts of this endpoint wait on tables that do not exist yet, and both fail open rather than
-pretending: the **`MANAGER` role check** needs `user_roles`, which ships with RBAC in v2, so today
-any active user with a primary team may receive a client; and **`transferOpenTasks`** is accepted
-and answered with `"tasksTransferred": 0`, because tasks live in interaction-service and nothing
-can have followed the client. The count is reported rather than omitted so the response shape does
-not change when it starts being true.
+One part of this endpoint still waits on a table that does not exist yet, and it fails open rather
+than pretending: the **`MANAGER` role check** needs `user_roles`, which ships with RBAC in v2, so
+today any active user with a primary team may receive a client.
+
+**`transferOpenTasks` is honoured** (TR-BR-11). The flag travels on `client.reassigned` and
+interaction-service's consumer moves every `OPEN`/`IN_PROGRESS` task to the new owner in its own
+transaction, appending a `REASSIGNED` history row and emitting one `task.reassigned` per task under
+a shared `correlation_id`. It is deliberately *not* a REST call inside this request: a synchronous
+transfer that succeeded before this transaction failed would leave tasks with a manager who does not
+own the client, and nothing would ever notice. `tasksTransferred` is counted from interaction-service
+at the moment of the reassignment and is therefore a report rather than the mechanism — `null` when
+interaction-service could not be reached, which is not the same answer as `0` and is not a reason to
+refuse a legitimate handover.
 
 ---
 
@@ -1021,6 +1052,16 @@ survive the hop, and ER-01's `404` passes back through the calling service uncha
 | `GET` | `/internal/clients/{id}/access?permission=<code>` | `200` with `{clientId, ownerManagerId, teamId, status, kycStatus}` when the caller holds that permission over the client; `404` when absent or out of scope; `403` when the permission is held at no scope |
 | `GET` | `/internal/users?ids=<uuid>,<uuid>` | `200` with `[{id, fullName}]` — display names for authors and assignees, capped at 100 ids |
 | `GET` | `/internal/me/teams` | `200` with `{teamIds, primaryTeamId}` — the caller's own `TEAM` scope (RB-BR-02), for a question about many clients at once |
+| `GET` | `/internal/teams/{teamId}` | `200` with `{id, name, timezone, members:[{id, fullName}]}` — the roster TR-US-05's dashboard aggregates over; `403 SCOPE_VIOLATION` when the team is not the caller's, `404 TEAM_NOT_FOUND` when there is none |
+
+`/internal/teams/{teamId}` is the one call the supervisor dashboard cannot do without: a task knows
+its assignee but not whose team that assignee is on, and interaction-service must not learn — there is
+one owner of the org chart. It requires `dashboard:team`, at `TEAM` for the caller's own teams and at
+`ALL` for any, checked here **as well as** at the caller, because a service boundary is not a trust
+boundary. `members` is everyone who can hold work for the team — the supervisor, the `team_members`
+rows and anyone whose `primary_team_id` points at it — active only, since RB-BR-07 has already moved a
+deactivated manager's work. It discloses staff names and team membership, the same corporate directory
+data as `/internal/users` and the same reason `users.email` is plaintext (§4.7).
 
 `/internal/me/teams` exists because `/access` settles one client and the cross-client feed and team
 ticket queue have no client id to ask about. `teamIds` is a **set**: RB-BR-02's `TEAM` is every team
@@ -1893,24 +1934,30 @@ Filter bar over a virtualized reverse-chronological list with day separators.
 
 **Service:** `interaction-service` · **Phase:** v3 · **Prefix:** `TR`
 
-**Built so far:** the task lifecycle — create, the scoped list with buckets, read with history, edit,
-complete, snooze, reassign and cancel — plus `tasks`, `task_reminders` and `task_history`, and
-reminder rows scheduled and rescheduled per TR-BR-07.
+**Built so far:** the whole lifecycle — create, the scoped list with buckets, read with history,
+edit, complete (with `logInteraction`), snooze, reassign and cancel — plus `tasks`,
+`task_reminders` and `task_history`; the escalation ladder (TR-BR-08) as a 15-minute sweep; reminder
+delivery with TR-EC-14's re-check, TR-EC-08's backoff and TR-BR-09's idempotency; both dashboards
+(TR-US-05, TR-US-08) with TR-BR-13's 30-second cache; and TR-BR-11, wired through the
+`client.reassigned` consumer.
 
 **Not built yet,** and absent rather than stubbed so nothing reads as working when it is not:
 
-- the escalation sweep (TR-BR-08). `escalation_level` and `escalated_at` exist and are enforced by
-  constraints; nothing advances them yet, so every live task sits at level 0.
-- reminder **delivery**. Rows reach `SCHEDULED` and stay there: there is no notifier, so TR-US-07's
-  "in-app plus email" does not happen. TR-EC-14's re-check before sending belongs with it.
-- both dashboards, `GET /dashboard/overdue` (TR-US-05) and `GET /dashboard/team-summary`
-  (TR-US-08). The partial indexes TR-BR-13 relies on are in place.
-- `logInteraction` on complete. The field is **not accepted** by the endpoint rather than accepted
-  and ignored — a caller who sets it would otherwise believe a note reached the timeline.
-- automatic `KYC_REFRESH` creation from the KYC expiry job (TR-BR-10). The cancellation half of that
-  rule *is* enforced: a manager cannot cancel one.
-- TR-BR-11's wiring. `TaskService.transferLiveTasks` implements it and the `client.reassigned`
-  consumer does not call it yet, so a client handover does not move its tasks.
+- **an email transport.** Reminder delivery is complete as a state machine, and `IN_APP` is fully
+  delivered — the badge the UI draws is a read of the task board, so marking the row `SENT` is the
+  delivery. There is no SMTP in the stack (§1.2 has no notification service), so an `EMAIL` reminder
+  is recorded `FAILED` with `last_error = 'NO_TRANSPORT_CONFIGURED'` rather than reported as sent. A
+  real transport drops in behind `ReminderTransport` without touching the state machine.
+- **escalation notifications.** The ladder advances, writes history and publishes `task.escalated`
+  with the assignee and the rung. It names no recipient: TR-BR-08's "notify the assignee's
+  supervisor" needs the org chart, which interaction-service does not own and cannot ask about from a
+  scheduled job — there is no caller whose token it could relay. Resolving the recipient belongs to a
+  consumer of `task.events` in client-service, which owns `teams.supervisor_id`.
+- automatic `KYC_REFRESH` creation from the KYC expiry job (TR-BR-10). CP-BR-06's nightly sweep does
+  not exist yet, so neither does the task it would create. The cancellation half of TR-BR-10 *is*
+  enforced: a manager cannot cancel one.
+- `POST /tasks/bulk-reassign` (TR-EC-02). One task at a time works; the 200-per-call filtered form
+  with a partial-success report does not exist.
 
 Follow-up actions with due dates, plus the supervisor dashboard that surfaces overdue work across a team — the second half of the problem statement ("супервайзер не видит просроченные задачи по клиентам в реальном времени").
 
@@ -2020,6 +2067,13 @@ CREATE INDEX ix_tasks_completed ON tasks (completed_by, completed_at)
 -- Escalation sweep
 CREATE INDEX ix_tasks_escalation_sweep ON tasks (due_at)
     WHERE status IN ('OPEN','IN_PROGRESS') AND escalation_level < 3;
+
+-- Coaching metrics over a selectable period (TR-US-08). Keyed on the assignee, not on whoever
+-- clicked complete: TR-EC-16 leaves the on-time rate with the assignee. Neither is partial to live
+-- work — "the last 30 days" is mostly completed tasks, which is what the partial indexes exclude.
+CREATE INDEX ix_tasks_assignee_created ON tasks (assignee_id, created_at);
+CREATE INDEX ix_tasks_assignee_completed ON tasks (assignee_id, completed_at)
+    WHERE status = 'DONE';
 ```
 
 #### 7.2.3 `task_reminders`
@@ -2055,20 +2109,24 @@ CREATE TABLE task_history (
     id          BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id     UUID        NOT NULL,
     changed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    changed_by  UUID        NOT NULL,
-    change_type VARCHAR(32) NOT NULL,   -- CREATED, REASSIGNED, SNOOZED, ESCALATED, STATUS_CHANGED
+    changed_by  UUID,                   -- NULL only for ESCALATED: the sweep has no human behind it
+    change_type VARCHAR(32) NOT NULL,   -- CREATED, REASSIGNED, SNOOZED, ESCALATED, STATUS_CHANGED,
+                                        -- DUE_CHANGED, INTERACTION_LOGGED
     from_value  TEXT,
     to_value    TEXT,
     reason      TEXT,
 
     CONSTRAINT fk_task_history_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-    CONSTRAINT fk_task_history_user FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE RESTRICT
+    CONSTRAINT fk_task_history_user FOREIGN KEY (changed_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT ck_task_history_actor CHECK (changed_by IS NOT NULL OR change_type = 'ESCALATED')
 );
 
 CREATE INDEX ix_task_history_task ON task_history (task_id, changed_at DESC);
 ```
 
 This duplicates part of the audit trail on purpose: `task_history` is a **product feature** ("who moved this task?" rendered in the drawer), while `audit_log` is a **compliance artifact**. They have different retention, different access rules and different owners; coupling them would compromise both.
+
+**On a null `changed_by`.** Every row but one has a person behind it. TR-BR-08's escalation sweep does not — it acts on behalf of the rule, 15 minutes after a deadline, with no request and no actor. Stamping the assignee's id would produce a drawer entry reading "Adam escalated his own overdue task", which is false in exactly the way nobody would catch. So `changed_by` is nullable and `ck_task_history_actor` names the single `change_type` that may use it; the UI renders a null actor as "System". (Tightened in `V9__task_automation.sql`; `V8` had it `NOT NULL`, which made `ESCALATED` unwritable.)
 
 ### 7.3 API endpoints
 
@@ -2280,10 +2338,26 @@ Sets `status = 'CANCELLED'`. Tasks are never hard-deleted — a cancelled commit
 
 `topOverdue` is capped at 50, ordered by `overdueByHours DESC`. The response is cached for 30 s per `(teamId, filter)` key; `generatedAt` lets the UI show data age honestly instead of implying real-time.
 
+Three things about the built response, each a deliberate reading of this contract:
+
+- **`topOverdue[]` carries `clientId`, not `client.displayName`.** Client names are AES-256-GCM
+  encrypted PII owned by client-service (§4.7), and every cross-client list in interaction-service —
+  `GET /tickets`, `GET /tasks` — returns the id for the caller to resolve. Decrypting fifty clients to
+  label a dashboard would put a fan-out on the hot path of a screen that refreshes every 60 seconds.
+- **`minAgeHours` filters `totals.overdue` and `ageBuckets` together**, so the bands always sum to the
+  headline. `openTotal` is not an age question and is left alone by it.
+- **`teamId` is required at `ALL` scope**, and for a supervisor covering more than one team. An admin
+  has no team to default to, and RB-BR-02's `TEAM` is a set — silently picking the primary would show
+  a two-branch supervisor half their book on the one screen whose purpose is completeness.
+
+`byManager[].onTimeCompletionRate` is `null`, not `0`, for a manager who completed nothing in the
+last 30 days: a rate of zero reads as a failure, and having finished no tasks is not one.
+
 | Status | Code | Cause |
 |---|---|---|
-| `403` | `ROLE_REQUIRED` | Caller is a manager |
-| `403` | `SCOPE_VIOLATION` | Supervisor requesting another team's `teamId` |
+| `400` | `VALIDATION_FAILED` | `teamId` omitted at `ALL` scope, or by a supervisor covering several teams |
+| `403` | `ROLE_REQUIRED` | Caller holds no `dashboard:team` at any scope — which a manager does not. Checked as a permission, never as a role (RB-BR-01); the code name is historical |
+| `403` | `SCOPE_VIOLATION` | Supervisor requesting another team's `teamId`, or a `managerId` who is not on the team |
 
 ---
 
@@ -2294,9 +2368,19 @@ Sets `status = 'CANCELLED'`. Tasks are never hard-deleted — a cancelled commit
 
 Returns per-manager counts of `created`, `completed`, `completedOnTime`, `overdueNow`, `avgDaysLate`, `snoozeRate`, plus a time series for charting.
 
+Everything is attributed to the **assignee**, including `completed`. TR-EC-16 is explicit that a
+supervisor finishing somebody's task leaves the on-time rate with the assignee, so the intervention
+shows up in `task_history` without distorting the coaching data it was meant to fix. `created` and
+`completed` are counted over different sets — a task completed on the 3rd may have been created in
+March — which is why `ix_tasks_assignee_created` and `ix_tasks_assignee_completed` both exist.
+
+`snoozeRate` and `onTimeRate` are `null` when their denominator is zero, for the same reason as
+`onTimeCompletionRate` above.
+
 | Status | Code | Cause |
 |---|---|---|
-| `400` | `VALIDATION_FAILED` | Range over 365 days |
+| `400` | `VALIDATION_FAILED` | Range over 365 days; `from` not before `to`; `granularity` other than `DAY` or `WEEK`; `teamId` omitted at `ALL` scope |
+| `403` | `ROLE_REQUIRED` | Caller holds no `dashboard:team` |
 
 ---
 
@@ -2433,7 +2517,7 @@ An append-only, tamper-evident record of every mutation and every PII disclosure
 ```sql
 CREATE TYPE audit_action AS ENUM (
     'CREATE','UPDATE','DELETE','MERGE',
-    'READ_SENSITIVE','EXPORT',
+    'READ_SENSITIVE','EXPORT','ESCALATE',
     'LOGIN_SUCCESS','LOGIN_FAILURE','LOGOUT','TOKEN_REFRESH',
     'PERMISSION_DENIED','ROLE_CHANGE','ACCESS_GRANT','ACCESS_REVOKE');
 CREATE TYPE export_status AS ENUM ('QUEUED','RUNNING','COMPLETED','FAILED','EXPIRED');
@@ -2450,6 +2534,7 @@ CREATE TABLE audit_log (
     occurred_at   TIMESTAMPTZ  NOT NULL,             -- when the change happened (producer clock)
     recorded_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- when audit-service persisted it
     -- actor: denormalized, never an FK (audit-service owns no user table)
+    actor_type    audit.actor_type NOT NULL DEFAULT 'USER',  -- USER or SYSTEM (§3.3)
     actor_id      UUID,
     actor_email   VARCHAR(255),
     actor_role    VARCHAR(32),
@@ -2475,7 +2560,15 @@ CREATE TABLE audit_log (
     CONSTRAINT ck_audit_chain_seq CHECK (chain_seq >= 0),
     CONSTRAINT ck_audit_recorded_after CHECK (recorded_at >= occurred_at - INTERVAL '1 hour'),
     CONSTRAINT ck_audit_actor_present CHECK (
-        actor_id IS NOT NULL OR action IN ('LOGIN_FAILURE')   -- failed login has no authenticated actor
+        -- A USER row names its user; a failed login is the one user action with nobody
+        -- identifiable behind it; a SYSTEM row names a job instead and must carry no id (§3.3).
+        -- The last branch is V2's retention rows, which predate actor_type and are stored as USER
+        -- with no id — kept so the rule does not retroactively invalidate history that AT-BR-01
+        -- forbids rewriting.
+        (actor_type = 'USER' AND actor_id IS NOT NULL)
+        OR action = 'LOGIN_FAILURE'
+        OR (actor_type = 'SYSTEM' AND actor_id IS NULL)
+        OR (service = 'audit-service' AND entity_type = 'AUDIT_PARTITION')
     )
 ) PARTITION BY RANGE (occurred_at);
 
@@ -3406,7 +3499,7 @@ Returns roles × permissions × scopes, read from `role_permissions` — the sam
 | RB-BR-04 | An active break-glass grant widens `client:read`, `client:write`, `interaction:read`, `interaction:write`, `ticket:read`, `ticket:write`, `task:read` and `task:write` for that one client, for its window only — an **allow list**, so a permission code added to the matrix later is not grantable until someone decides it should be. It never widens `client:delete`, `client:merge`, `*:reassign`, `interaction:delete`, `access:approve` or any audit permission: break-glass is for continuity of service, and destroying or reassigning someone else's records, or approving your own access, is not continuity. A grant also only ever *widens* — it extends a permission the caller already holds at some scope to cover one more client, and never hands out a permission their roles do not grant. |
 | RB-BR-05 | The access token carries `userId`, `roles`, `permissions` with scopes, `teamIds` and `grantIds`. It lives 15 minutes, so a revocation takes effect within 15 minutes at worst, and immediately on the next refresh. In `client-service` the bound is tighter than that and needs no denylist: `AccessPolicy` resolves permission and scope from `user_roles` per request and requires `users.status = 'ACTIVE'`, so a deactivation or a role change ends access on the **next request**, not within 60 seconds. The token's claims are the fallback for the two services that hold no RBAC tables, where the 15-minute lifetime is the bound. |
 | RB-BR-06 | **No self-elevation.** A user cannot grant themselves a role, approve their own break-glass request, or approve KYC on a client they own (CP-BR-05). Enforced at request time by comparing the acting subject with the target, so holding `role:assign` is not enough. |
-| RB-BR-07 | **Referential safety on deactivation.** Deactivation is refused while the user owns clients, is assigned open tasks, is the assignee of open tickets, or is the sole supervisor of a team. The `409` response enumerates each blocker with counts and a deep link, so the admin can clear them in one pass. This is what makes `ON DELETE RESTRICT` on `owner_manager_id` a safety net rather than a wall. Open tickets live in `interaction-service`, so the count comes from `GET /internal/users/{id}/open-work` there; if that call fails the deactivation is refused with `503` rather than allowed, because a deactivation that proceeded on an unknown count would strand tickets with an assignee who no longer exists. Open **tasks** join the answer when Task/Reminder ships (§7) — they are absent from it rather than reported as zero, so a blocker cannot silently read "none" because its module does not exist yet. |
+| RB-BR-07 | **Referential safety on deactivation.** Deactivation is refused while the user owns clients, is assigned open tasks, is the assignee of open tickets, or is the sole supervisor of a team. The `409` response enumerates each blocker with counts and a deep link, so the admin can clear them in one pass. This is what makes `ON DELETE RESTRICT` on `owner_manager_id` a safety net rather than a wall. Open tickets live in `interaction-service`, so the count comes from `GET /internal/users/{id}/open-work` there; if that call fails the deactivation is refused with `503` rather than allowed, because a deactivation that proceeded on an unknown count would strand tickets with an assignee who no longer exists. Open **tasks** are in the answer too, as a separate `OPEN_TASKS` blocker with its own count: "4 tickets" and "11 tasks" are different pieces of work to clear, and an admin given one number would clear it and be refused again. |
 | RB-BR-08 | At least one `ACTIVE` user with the `ADMIN` role must exist at all times. Removing the last admin role or deactivating the last admin returns `422 BUSINESS_RULE_VIOLATED`. A system nobody can administer is unrecoverable. |
 | RB-BR-09 | Break-glass requires a second person: the requester and the approver are always different users, the reason is at least 20 characters, and the window never exceeds 8 hours (DB constraint). Every read under a grant records `access_grant_id` in the audit `context` (AT-BR-13). |
 | RB-BR-10 | Refresh tokens rotate on every use and are tracked by `family_id`. Presenting an already-used token means the token was stolen, so the whole family is revoked and the user is signed out everywhere. |
